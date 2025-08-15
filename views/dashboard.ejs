@@ -7,6 +7,17 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
+        .navbar-brand {
+            font-weight: bold;
+            color: #007bff !important;
+        }
+        .sidebar {
+            min-height: calc(100vh - 56px);
+            background-color: #f8f9fa;
+        }
+        .main-content {
+            min-height: calc(100vh - 56px);
+        }
         .file-upload-area {
             border: 2px dashed #007bff;
             border-radius: 10px;
@@ -20,107 +31,494 @@
             background-color: #e9ecef;
             border-color: #0056b3;
         }
+        .stats-card {
+            border-radius: 10px;
+            transition: transform 0.2s;
+        }
+        .stats-card:hover {
+            transform: translateY(-2px);
+        }
+        .progress-container {
+            display: none;
+            margin-top: 20px;
+        }
+        .table th {
+            background-color: #f8f9fa;
+            border-top: none;
+        }
+        .badge-file-size {
+            font-size: 0.75em;
+        }
+        .user-avatar {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 12px;
+        }
+        .order-stats {
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+            color: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
     </style>
 </head>
 <body>
+    <!-- Navigation -->
     <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
         <div class="container-fluid">
             <a class="navbar-brand" href="/dashboard">
                 <i class="fas fa-file-code me-2"></i>EDI Parser
             </a>
+            
             <div class="navbar-nav ms-auto">
-                <div class="dropdown">
-                    <a class="nav-link dropdown-toggle text-white" href="#" role="button" data-bs-toggle="dropdown">
-                        <i class="fas fa-user me-1"></i><%= user.username %> 
-                        <span class="badge bg-secondary"><%= user.type %></span>
+                <div class="nav-item dropdown">
+                    <a class="nav-link dropdown-toggle text-white" href="#" id="navbarDropdown" role="button" data-bs-toggle="dropdown">
+                        <i class="fas fa-user me-1"></i>
+                        <%= user.username %> 
+                        <span class="badge bg-secondary ms-1"><%= user.type %></span>
                     </a>
                     <ul class="dropdown-menu">
-                        <li><a class="dropdown-item" href="/dashboard">Dashboard</a></li>
+                        <li><a class="dropdown-item" href="/dashboard">
+                            <i class="fas fa-tachometer-alt me-2"></i>Dashboard
+                        </a></li>
+                        <li><a class="dropdown-item" href="/orders">
+                            <i class="fas fa-shopping-cart me-2"></i>Order Management
+                        </a></li>
                         <% if (user.type === 'admin') { %>
-                        <li><a class="dropdown-item" href="/logs">User Logs</a></li>
-                        <% } %>
+                        <li><a class="dropdown-item" href="/logs">
+                            <i class="fas fa-list me-2"></i>User Logs
+                        </a></li>
                         <li><hr class="dropdown-divider"></li>
-                        <li><a class="dropdown-item" href="/logout">Logout</a></li>
+                        <% } %>
+                        <li><a class="dropdown-item" href="/logout">
+                            <i class="fas fa-sign-out-alt me-2"></i>Logout
+                        </a></li>
                     </ul>
                 </div>
             </div>
         </div>
     </nav>
 
-    <div class="container-fluid mt-4">
-        <h2><i class="fas fa-tachometer-alt me-2"></i>Dashboard</h2>
-        
-        <div class="row mb-4">
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <h5><i class="fas fa-upload me-2"></i>Upload EDI File</h5>
-                    </div>
-                    <div class="card-body">
-                        <div class="file-upload-area" onclick="document.getElementById('fileInput').click()">
-                            <i class="fas fa-cloud-upload-alt fa-3x text-primary mb-3"></i>
-                            <h5>Drop your .EDIdat file here</h5>
-                            <p class="text-muted">or click to browse files</p>
-                            <button type="button" class="btn btn-primary">Choose File</button>
-                        </div>
-                        <input type="file" id="fileInput" accept=".edidat" style="display: none;">
-                    </div>
-                </div>
-            </div>
-            
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <h5><i class="fas fa-file-alt me-2"></i>Recent Files</h5>
-                    </div>
-                    <div class="card-body">
-                        <% if (recentFiles.length > 0) { %>
-                        <% recentFiles.forEach(file => { %>
-                        <div class="d-flex justify-content-between align-items-center mb-2">
-                            <span><%= file.original_filename %></span>
-                            <a href="/file/<%= file.id %>" class="btn btn-sm btn-outline-primary">View</a>
-                        </div>
-                        <% }); %>
-                        <% } else { %>
-                        <p class="text-muted">No files uploaded yet</p>
+    <!-- Main Content -->
+    <div class="container-fluid">
+        <div class="row">
+            <!-- Sidebar -->
+            <nav class="col-md-3 col-lg-2 d-md-block sidebar collapse">
+                <div class="position-sticky pt-3">
+                    <ul class="nav flex-column">
+                        <li class="nav-item">
+                            <a class="nav-link active" href="/dashboard">
+                                <i class="fas fa-tachometer-alt me-2"></i>Dashboard
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="#upload" onclick="scrollToUpload()">
+                                <i class="fas fa-upload me-2"></i>Upload EDI File
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/orders">
+                                <i class="fas fa-shopping-cart me-2"></i>Order Management
+                            </a>
+                        </li>
+                        <% if (user.type === 'admin') { %>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/logs">
+                                <i class="fas fa-list me-2"></i>User Activity Logs
+                            </a>
+                        </li>
                         <% } %>
+                    </ul>
+                </div>
+            </nav>
+
+            <!-- Page Content -->
+            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 main-content">
+                <div class="pt-3">
+                    <!-- Header -->
+                    <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pb-2 mb-3 border-bottom">
+                        <h1 class="h2">
+                            <i class="fas fa-tachometer-alt me-2 text-primary"></i>
+                            Dashboard
+                        </h1>
+                        <div class="btn-toolbar mb-2 mb-md-0">
+                            <div class="btn-group me-2">
+                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="location.reload()">
+                                    <i class="fas fa-sync-alt me-1"></i>Refresh
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Welcome Message -->
+                    <div class="row mb-4">
+                        <div class="col-12">
+                            <div class="alert alert-info border-0" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+                                <h5 class="alert-heading mb-1">
+                                    <i class="fas fa-hand-wave me-2"></i>
+                                    Welcome back, <%= user.username %>!
+                                </h5>
+                                <p class="mb-0">
+                                    <% if (user.type === 'admin') { %>
+                                    You have full administrative access to upload, manage EDI files, and view user activity logs.
+                                    <% } else { %>
+                                    You can upload and view EDI files with automatic order processing. Use the upload section below to get started.
+                                    <% } %>
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Order Statistics -->
+                    <% if (orderStats && orderStats.total_orders > 0) { %>
+                    <div class="row mb-4">
+                        <div class="col-12">
+                            <div class="order-stats">
+                                <h5 class="mb-3">
+                                    <i class="fas fa-shopping-cart me-2"></i>Order Management Overview
+                                </h5>
+                                <div class="row">
+                                    <div class="col-md-4">
+                                        <h3 class="mb-1"><%= orderStats.total_orders %></h3>
+                                        <small>Total Orders in System</small>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <h3 class="mb-1"><%= orderStats.orders_today %></h3>
+                                        <small>New Orders Today</small>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <h3 class="mb-1"><%= orderStats.updated_today %></h3>
+                                        <small>Updated Orders Today</small>
+                                    </div>
+                                </div>
+                                <div class="mt-3">
+                                    <a href="/orders" class="btn btn-light btn-sm">
+                                        <i class="fas fa-eye me-1"></i>View All Orders
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <% } %>
+
+                    <!-- Stats Cards -->
+                    <div class="row mb-4">
+                        <div class="col-md-4">
+                            <div class="card stats-card border-0 shadow-sm">
+                                <div class="card-body text-center">
+                                    <div class="display-6 text-primary mb-2">
+                                        <i class="fas fa-file-upload"></i>
+                                    </div>
+                                    <h6 class="card-title text-muted">Recent Files</h6>
+                                    <h3 class="text-primary" id="totalFiles"><%= recentFiles.length %></h3>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card stats-card border-0 shadow-sm">
+                                <div class="card-body text-center">
+                                    <div class="display-6 text-success mb-2">
+                                        <i class="fas fa-check-circle"></i>
+                                    </div>
+                                    <h6 class="card-title text-muted">Access Level</h6>
+                                    <h3 class="text-success">
+                                        <% if (user.type === 'admin') { %>
+                                        Admin
+                                        <% } else { %>
+                                        User
+                                        <% } %>
+                                    </h3>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card stats-card border-0 shadow-sm">
+                                <div class="card-body text-center">
+                                    <div class="display-6 text-warning mb-2">
+                                        <i class="fas fa-language"></i>
+                                    </div>
+                                    <h6 class="card-title text-muted">Format Support</h6>
+                                    <h6 class="text-warning">Japanese EDI</h6>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- File Upload Section -->
+                    <div class="row mb-4" id="upload">
+                        <div class="col-12">
+                            <div class="card border-0 shadow-sm">
+                                <div class="card-header bg-white">
+                                    <h5 class="mb-0">
+                                        <i class="fas fa-upload me-2 text-primary"></i>
+                                        Upload Japanese EDI File
+                                    </h5>
+                                </div>
+                                <div class="card-body">
+                                    <div class="file-upload-area" id="uploadArea">
+                                        <div class="mb-3">
+                                            <i class="fas fa-cloud-upload-alt fa-3x text-primary mb-3"></i>
+                                            <h5>Drop your .EDIdat file here</h5>
+                                            <p class="text-muted mb-3">Automatic Japanese encoding detection and order processing</p>
+                                            <button type="button" class="btn btn-primary">
+                                                <i class="fas fa-folder-open me-2"></i>Choose File
+                                            </button>
+                                        </div>
+                                        <small class="text-muted">
+                                            Supported format: .EDIdat files | Maximum size: 50MB | Auto-detects: Shift_JIS, CP932, EUC-JP
+                                        </small>
+                                    </div>
+                                    
+                                    <div class="progress-container">
+                                        <div class="progress mb-2">
+                                            <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                                                 role="progressbar" style="width: 0%"></div>
+                                        </div>
+                                        <small class="text-muted">Uploading and processing orders...</small>
+                                    </div>
+
+                                    <input type="file" id="fileInput" accept=".edidat,.edi,.txt" style="display: none;">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Recent Files -->
+                    <div class="row">
+                        <div class="col-12">
+                            <div class="card border-0 shadow-sm">
+                                <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                                    <h5 class="mb-0">
+                                        <i class="fas fa-file-alt me-2 text-primary"></i>
+                                        Recent Files
+                                    </h5>
+                                    <small class="text-muted">Last 10 uploads</small>
+                                </div>
+                                <div class="card-body p-0">
+                                    <% if (recentFiles.length > 0) { %>
+                                    <div class="table-responsive">
+                                        <table class="table table-hover mb-0">
+                                            <thead>
+                                                <tr>
+                                                    <th>File Name</th>
+                                                    <th>Uploaded By</th>
+                                                    <th>Upload Date</th>
+                                                    <th>Size</th>
+                                                    <th>Actions</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <% recentFiles.forEach(file => { %>
+                                                <tr>
+                                                    <td>
+                                                        <i class="fas fa-file-code text-primary me-2"></i>
+                                                        <%= file.original_filename %>
+                                                    </td>
+                                                    <td>
+                                                        <div class="d-flex align-items-center">
+                                                            <div class="user-avatar me-2">
+                                                                <%= file.uploaded_by.charAt(0).toUpperCase() %>
+                                                            </div>
+                                                            <%= file.uploaded_by %>
+                                                        </div>
+                                                    </td>
+                                                    <td>
+                                                        <small class="text-muted">
+                                                            <%= new Date(file.upload_timestamp).toLocaleDateString() %>
+                                                            <%= new Date(file.upload_timestamp).toLocaleTimeString() %>
+                                                        </small>
+                                                    </td>
+                                                    <td>
+                                                        <span class="badge bg-secondary badge-file-size">
+                                                            <%= file.file_size ? (file.file_size / 1024).toFixed(1) + ' KB' : 'Unknown' %>
+                                                        </span>
+                                                    </td>
+                                                    <td>
+                                                        <a href="/file/<%= file.id %>" class="btn btn-sm btn-outline-primary">
+                                                            <i class="fas fa-eye me-1"></i>View
+                                                        </a>
+                                                        <% if (user.type === 'admin') { %>
+                                                        <button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteFile(<%= file.id %>)">
+                                                            <i class="fas fa-trash me-1"></i>Delete
+                                                        </button>
+                                                        <% } %>
+                                                    </td>
+                                                </tr>
+                                                <% }); %>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    <% } else { %>
+                                    <div class="text-center py-5">
+                                        <i class="fas fa-file-upload fa-3x text-muted mb-3"></i>
+                                        <h6 class="text-muted">No files uploaded yet</h6>
+                                        <p class="text-muted mb-3">Upload your first Japanese .EDIdat file to get started with order management</p>
+                                        <button class="btn btn-primary" onclick="scrollToUpload()">
+                                            <i class="fas fa-upload me-2"></i>Upload File
+                                        </button>
+                                    </div>
+                                    <% } %>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
-            </div>
+            </main>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        document.getElementById('fileInput').addEventListener('change', function(e) {
+        // File upload functionality
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const progressContainer = document.querySelector('.progress-container');
+        const progressBar = document.querySelector('.progress-bar');
+
+        function scrollToUpload() {
+            document.getElementById('upload').scrollIntoView({ behavior: 'smooth' });
+        }
+
+        // Click to upload
+        uploadArea.addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        // Drag and drop functionality
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFileUpload(files[0]);
+            }
+        });
+
+        // File input change
+        fileInput.addEventListener('change', (e) => {
             if (e.target.files.length > 0) {
-                const file = e.target.files[0];
-                if (!file.name.toLowerCase().endsWith('.edidat')) {
-                    alert('Please upload a .EDIdat file only');
-                    return;
+                handleFileUpload(e.target.files[0]);
+            }
+        });
+
+        function handleFileUpload(file) {
+            // Validate file type
+            if (!file.name.toLowerCase().endsWith('.edidat') && !file.name.toLowerCase().endsWith('.edi') && !file.name.toLowerCase().endsWith('.txt')) {
+                alert('Please upload a .EDIdat, .edi, or .txt file only');
+                return;
+            }
+
+            // Validate file size (50MB limit)
+            if (file.size > 50 * 1024 * 1024) {
+                alert('File size must be less than 50MB');
+                return;
+            }
+
+            // Show progress
+            progressContainer.style.display = 'block';
+            progressBar.style.width = '0%';
+
+            // Create FormData
+            const formData = new FormData();
+            formData.append('ediFile', file);
+
+            // Upload file
+            const xhr = new XMLHttpRequest();
+
+            xhr.upload.addEventListener('progress', (e) => {
+                if (e.lengthComputable) {
+                    const percentComplete = (e.loaded / e.total) * 100;
+                    progressBar.style.width = percentComplete + '%';
                 }
+            });
+
+            xhr.addEventListener('load', () => {
+                progressContainer.style.display = 'none';
                 
-                const formData = new FormData();
-                formData.append('ediFile', file);
-                
-                fetch('/upload', {
-                    method: 'POST',
-                    body: formData
+                if (xhr.status === 200) {
+                    const response = JSON.parse(xhr.responseText);
+                    if (response.success) {
+                        let message = 'File uploaded and processed successfully!';
+                        if (response.orderSummary) {
+                            message += `\n\nOrder Processing Results:`;
+                            message += `\n• ${response.orderSummary.new} new orders`;
+                            message += `\n• ${response.orderSummary.updated} updated orders`;
+                            message += `\n• ${response.orderSummary.unchanged} unchanged orders`;
+                        }
+                        alert(message);
+                        // Redirect to file view
+                        window.location.href = '/file/' + response.fileId;
+                    } else {
+                        alert('Upload failed: ' + response.message);
+                    }
+                } else {
+                    const error = JSON.parse(xhr.responseText);
+                    alert('Upload failed: ' + error.error);
+                }
+            });
+
+            xhr.addEventListener('error', () => {
+                progressContainer.style.display = 'none';
+                alert('Upload failed due to network error');
+            });
+
+            xhr.open('POST', '/upload');
+            xhr.send(formData);
+        }
+
+        <% if (user.type === 'admin') { %>
+        function deleteFile(fileId) {
+            if (confirm('Are you sure you want to delete this file?')) {
+                fetch('/file/' + fileId, {
+                    method: 'DELETE',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
                 })
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
-                        alert('File uploaded successfully!');
-                        window.location.href = '/file/' + data.fileId;
+                        location.reload();
                     } else {
-                        alert('Upload failed: ' + data.error);
+                        alert('Failed to delete file: ' + data.message);
                     }
                 })
                 .catch(error => {
-                    alert('Upload failed: ' + error.message);
+                    alert('Error deleting file: ' + error.message);
                 });
             }
-        });
+        }
+        <% } %>
+
+        // Auto-refresh stats every 30 seconds
+        setInterval(() => {
+            // Update total files count
+            fetch('/api/stats')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('totalFiles').textContent = data.totalFiles;
+                })
+                .catch(error => console.log('Stats update failed:', error));
+        }, 30000);
     </script>
 </body>
 </html>

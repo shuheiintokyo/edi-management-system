@@ -8,36 +8,34 @@
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
         .data-table {
-            font-size: 12px;
+            font-size: 11px;
             font-family: 'Courier New', monospace;
         }
         .data-table td {
-            max-width: 200px;
+            max-width: 120px;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+            padding: 4px 6px;
+            border: 1px solid #dee2e6;
+            vertical-align: top;
         }
         .data-table td:hover {
             overflow: visible;
             white-space: normal;
             word-wrap: break-word;
-        }
-        .encoding-issues {
             background-color: #fff3cd;
-            color: #856404;
-        }
-        .japanese-text {
-            background-color: #d1ecf1;
-            color: #0c5460;
-        }
-        .data-type-badge {
-            font-size: 10px;
-            padding: 2px 4px;
+            position: relative;
+            z-index: 10;
+            max-width: none;
         }
         .header-row {
-            background-color: #007bff;
-            color: white;
+            background-color: #007bff !important;
+            color: white !important;
             font-weight: bold;
+            position: sticky;
+            top: 0;
+            z-index: 5;
         }
         .data-row:nth-child(even) {
             background-color: #f8f9fa;
@@ -47,6 +45,37 @@
             color: white;
             border-radius: 10px;
             padding: 20px;
+            margin-bottom: 20px;
+        }
+        .japanese-text {
+            color: #dc3545;
+            font-weight: bold;
+        }
+        .order-id {
+            background-color: #28a745;
+            color: white;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-weight: bold;
+        }
+        .table-container {
+            max-height: 600px;
+            overflow-y: auto;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+        }
+        .order-summary {
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+            color: white;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .encoding-info {
+            background: linear-gradient(135deg, #ffc107 0%, #fd7e14 100%);
+            color: white;
+            border-radius: 10px;
+            padding: 15px;
             margin-bottom: 20px;
         }
     </style>
@@ -65,6 +94,7 @@
                     </a>
                     <ul class="dropdown-menu">
                         <li><a class="dropdown-item" href="/dashboard">Dashboard</a></li>
+                        <li><a class="dropdown-item" href="/orders">Order Management</a></li>
                         <% if (user.type === 'admin') { %>
                         <li><a class="dropdown-item" href="/logs">User Logs</a></li>
                         <% } %>
@@ -76,7 +106,7 @@
         </div>
     </nav>
 
-    <div class="container mt-4">
+    <div class="container-fluid mt-3">
         <nav aria-label="breadcrumb">
             <ol class="breadcrumb">
                 <li class="breadcrumb-item"><a href="/dashboard">Dashboard</a></li>
@@ -88,33 +118,99 @@
         <div class="file-stats">
             <h4><i class="fas fa-file-code me-2"></i><%= file.original_filename %></h4>
             <div class="row">
-                <div class="col-md-6">
+                <div class="col-md-8">
                     <small><strong>Uploaded by:</strong> <%= file.uploaded_by %></small><br>
                     <small><strong>Upload date:</strong> <%= new Date(file.upload_timestamp).toLocaleDateString() %></small><br>
-                    <small><strong>File size:</strong> <%= file.file_size ? (file.file_size / 1024).toFixed(1) + ' KB' : 'Unknown' %></small>
+                    <small><strong>File size:</strong> <%= file.file_size ? (file.file_size / 1024).toFixed(1) + ' KB' : 'Unknown' %></small><br>
+                    <small><strong>Encoding:</strong> Japanese (Auto-detected)</small>
                 </div>
-                <div class="col-md-6">
+                <div class="col-md-4 text-end">
                     <% if (parsedData && parsedData.statistics) { %>
-                    <small><strong>Total rows:</strong> <%= parsedData.statistics.totalSegments %></small><br>
-                    <small><strong>Data rows:</strong> <%= parsedData.statistics.dataRows %></small><br>
-                    <small><strong>Format:</strong> <%= parsedData.fileInfo ? parsedData.fileInfo.detectedFormat : 'Unknown' %></small><br>
-                    <% if (parsedData.statistics.encodingIssuesDetected) { %>
-                    <small><span class="badge bg-warning">⚠️ Encoding issues detected</span></small><br>
-                    <% } %>
-                    <% if (parsedData.statistics.japaneseTextDetected) { %>
-                    <small><span class="badge bg-info">🇯🇵 Japanese text detected</span></small>
-                    <% } %>
+                    <h3 class="mb-1"><%= parsedData.statistics.totalSegments %></h3>
+                    <small>Total Rows</small><br>
+                    <h5 class="mb-1"><%= parsedData.statistics.dataRows %></h5>
+                    <small>Data Rows</small><br>
+                    <small>Avg Elements: <%= parsedData.statistics.averageElementsPerRow %></small>
                     <% } %>
                 </div>
             </div>
         </div>
 
-        <!-- Tabs for different views -->
+        <!-- Order Management Summary -->
+        <% if (parsedData && parsedData.orderManagement && parsedData.orderManagement.results) { %>
+        <div class="order-summary">
+            <h5 class="mb-3">
+                <i class="fas fa-shopping-cart me-2"></i>Order Processing Results
+            </h5>
+            <div class="row">
+                <div class="col-md-3">
+                    <h4 class="mb-1"><%= parsedData.orderManagement.totalOrders %></h4>
+                    <small>Total Orders Found</small>
+                </div>
+                <div class="col-md-3">
+                    <h4 class="mb-1 text-success"><%= parsedData.orderManagement.results.summary.new %></h4>
+                    <small>New Orders Added</small>
+                </div>
+                <div class="col-md-3">
+                    <h4 class="mb-1 text-warning"><%= parsedData.orderManagement.results.summary.updated %></h4>
+                    <small>Orders Updated</small>
+                </div>
+                <div class="col-md-3">
+                    <h4 class="mb-1 text-info"><%= parsedData.orderManagement.results.summary.unchanged %></h4>
+                    <small>Unchanged Orders</small>
+                </div>
+            </div>
+            <div class="mt-3">
+                <a href="/orders" class="btn btn-light btn-sm">
+                    <i class="fas fa-eye me-1"></i>View All Orders
+                </a>
+            </div>
+        </div>
+        <% } %>
+
+        <!-- Encoding Information -->
+        <% if (parsedData && parsedData.fileInfo) { %>
+        <div class="encoding-info">
+            <h6 class="mb-2">
+                <i class="fas fa-language me-2"></i>Encoding & Format Information
+            </h6>
+            <div class="row">
+                <div class="col-md-6">
+                    <small><strong>Detected Format:</strong> <%= parsedData.fileInfo.detectedFormat %></small><br>
+                    <small><strong>Encoding:</strong> <%= parsedData.fileInfo.encoding %></small>
+                </div>
+                <div class="col-md-6">
+                    <small><strong>Original Length:</strong> <%= parsedData.fileInfo.originalLength %> chars</small><br>
+                    <small><strong>Lines:</strong> <%= parsedData.fileInfo.lineCount %></small>
+                </div>
+            </div>
+        </div>
+        <% } %>
+
+        <!-- Success Alert -->
+        <% if (parsedData && parsedData.segments && parsedData.segments.length > 0) { %>
+        <div class="alert alert-success alert-dismissible fade show">
+            <i class="fas fa-check-circle me-2"></i>
+            <strong>Parsing Successful!</strong> 
+            Found <%= parsedData.statistics.totalSegments %> rows with 
+            <%= parsedData.statistics.headerRows %> header and 
+            <%= parsedData.statistics.dataRows %> data rows.
+            <% if (parsedData.orderManagement) { %>
+            Order processing: <%= parsedData.orderManagement.totalOrders %> orders identified.
+            <% } %>
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+        <% } %>
+
+        <!-- Tabs -->
         <ul class="nav nav-tabs" id="fileTabs" role="tablist">
             <li class="nav-item" role="presentation">
                 <button class="nav-link active" id="table-tab" data-bs-toggle="tab" 
                         data-bs-target="#table-view" type="button" role="tab">
-                    <i class="fas fa-table me-2"></i>Table View
+                    <i class="fas fa-table me-2"></i>Table View 
+                    <% if (parsedData && parsedData.segments) { %>
+                    <span class="badge bg-light text-dark"><%= parsedData.segments.length %></span>
+                    <% } %>
                 </button>
             </li>
             <li class="nav-item" role="presentation">
@@ -129,41 +225,76 @@
                     <i class="fas fa-chart-pie me-2"></i>Analysis
                 </button>
             </li>
+            <% if (parsedData && parsedData.orderManagement) { %>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="orders-tab" data-bs-toggle="tab" 
+                        data-bs-target="#orders-view" type="button" role="tab">
+                    <i class="fas fa-shopping-cart me-2"></i>Orders
+                    <span class="badge bg-success"><%= parsedData.orderManagement.totalOrders %></span>
+                </button>
+            </li>
+            <% } %>
         </ul>
 
         <div class="tab-content" id="fileTabsContent">
             <!-- Table View -->
             <div class="tab-pane fade show active" id="table-view" role="tabpanel">
                 <div class="card mt-3">
-                    <div class="card-body">
+                    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                        <h6 class="mb-0">
+                            <i class="fas fa-table me-2"></i>Data Table
+                            <% if (parsedData && parsedData.segments) { %>
+                            <span class="badge bg-primary"><%= parsedData.segments.length %> rows</span>
+                            <% } %>
+                        </h6>
+                        <div>
+                            <button class="btn btn-sm btn-outline-primary" onclick="exportToCSV()">
+                                <i class="fas fa-download me-1"></i>Export CSV
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" onclick="toggleColumnNumbers()">
+                                <i class="fas fa-hashtag me-1"></i>Column #
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
                         <% if (parsedData && parsedData.segments && parsedData.segments.length > 0) { %>
-                        <div class="table-responsive">
-                            <table class="table table-sm data-table">
-                                <% parsedData.segments.forEach((segment, index) => { %>
-                                <tr class="<%= segment.type === 'HEADER' ? 'header-row' : 'data-row' %>">
-                                    <td style="width: 50px;"><strong><%= segment.index %></strong></td>
-                                    <% if (segment.elements && segment.elements.length > 0) { %>
-                                    <% segment.elements.forEach((element, elemIndex) => { %>
-                                    <td title="<%= element %>" 
-                                        class="<%= segment.containsEncodingIssues ? 'encoding-issues' : '' %> 
-                                               <%= segment.containsJapanese ? 'japanese-text' : '' %>">
-                                        <%= element %>
-                                        <% if (segment.interpretedData && segment.interpretedData[elemIndex]) { %>
-                                        <br><span class="badge data-type-badge bg-secondary">
-                                            <%= segment.interpretedData[elemIndex].dataType %>
-                                        </span>
+                        <div class="table-container">
+                            <table class="table table-sm data-table mb-0" id="dataTable">
+                                <tbody>
+                                    <% parsedData.segments.forEach((segment, rowIndex) => { %>
+                                    <tr class="<%= segment.type === 'HEADER' ? 'header-row sticky-header' : 'data-row' %>">
+                                        <!-- Row Index -->
+                                        <td style="width: 40px; text-align: center; font-weight: bold;">
+                                            <%= segment.index %>
+                                        </td>
+                                        
+                                        <!-- Data Elements -->
+                                        <% if (segment.elements && segment.elements.length > 0) { %>
+                                        <% segment.elements.forEach((element, colIndex) => { %>
+                                        <td title="Row <%= segment.index %>, Col <%= colIndex + 1 %>: <%= element %>" 
+                                            class="<%= segment.type === 'HEADER' ? '' : 
+                                                     (/^LK\d+/.test(element) ? 'order-id' : 
+                                                      (/[^\x00-\x7F]/.test(element) ? 'japanese-text' : '')) %>">
+                                            <%= element || '' %>
+                                        </td>
+                                        <% }); %>
                                         <% } %>
-                                    </td>
+                                    </tr>
                                     <% }); %>
-                                    <% } %>
-                                </tr>
-                                <% }); %>
+                                </tbody>
                             </table>
                         </div>
                         <% } else { %>
-                        <div class="alert alert-warning">
-                            <h6><i class="fas fa-exclamation-triangle me-2"></i>No Parsed Data</h6>
-                            <p>The file could not be parsed into a table format. Check the raw content tab for details.</p>
+                        <div class="text-center py-5">
+                            <i class="fas fa-exclamation-triangle fa-3x text-warning mb-3"></i>
+                            <h6>No Parsed Data Available</h6>
+                            <p class="text-muted">The file could not be parsed into table format.</p>
+                            <% if (parsedData && parsedData.error) { %>
+                            <div class="alert alert-danger">
+                                <strong>Error:</strong> <%= parsedData.error %><br>
+                                <small><%= parsedData.message %></small>
+                            </div>
+                            <% } %>
                         </div>
                         <% } %>
                     </div>
@@ -181,7 +312,7 @@
                     </div>
                     <div class="card-body">
                         <pre id="rawContent" class="bg-dark text-light p-3 rounded" 
-                             style="max-height: 500px; overflow-y: auto; font-size: 12px;"><%= file.file_content %></pre>
+                             style="max-height: 500px; overflow-y: auto; font-size: 11px; white-space: pre-wrap;"><%= file.file_content %></pre>
                     </div>
                 </div>
             </div>
@@ -190,79 +321,135 @@
             <div class="tab-pane fade" id="analysis-view" role="tabpanel">
                 <div class="card mt-3">
                     <div class="card-body">
-                        <% if (parsedData && parsedData.statistics) { %>
-                        <h6><i class="fas fa-chart-pie me-2"></i>File Analysis</h6>
-                        
+                        <% if (parsedData) { %>
                         <div class="row">
                             <div class="col-md-6">
-                                <h6>General Statistics</h6>
-                                <ul class="list-unstyled">
-                                    <li><strong>Total segments:</strong> <%= parsedData.statistics.totalSegments %></li>
-                                    <li><strong>Header rows:</strong> <%= parsedData.statistics.headerRows %></li>
-                                    <li><strong>Data rows:</strong> <%= parsedData.statistics.dataRows %></li>
-                                    <li><strong>Avg elements per row:</strong> <%= parsedData.statistics.averageElementsPerRow %></li>
-                                    <li><strong>Max elements in row:</strong> <%= parsedData.statistics.maxElementsInRow %></li>
-                                    <li><strong>Min elements in row:</strong> <%= parsedData.statistics.minElementsInRow %></li>
-                                </ul>
+                                <h6><i class="fas fa-chart-bar me-2"></i>File Statistics</h6>
+                                <table class="table table-sm">
+                                    <tr><td><strong>Total Segments:</strong></td><td><%= parsedData.totalSegments %></td></tr>
+                                    <% if (parsedData.statistics) { %>
+                                    <tr><td><strong>Header Rows:</strong></td><td><%= parsedData.statistics.headerRows %></td></tr>
+                                    <tr><td><strong>Data Rows:</strong></td><td><%= parsedData.statistics.dataRows %></td></tr>
+                                    <tr><td><strong>Avg Elements/Row:</strong></td><td><%= parsedData.statistics.averageElementsPerRow %></td></tr>
+                                    <% } %>
+                                    <% if (parsedData.fileInfo) { %>
+                                    <tr><td><strong>Detected Format:</strong></td><td><%= parsedData.fileInfo.detectedFormat %></td></tr>
+                                    <tr><td><strong>Encoding:</strong></td><td><%= parsedData.fileInfo.encoding %></td></tr>
+                                    <tr><td><strong>Original Length:</strong></td><td><%= parsedData.fileInfo.originalLength %> chars</td></tr>
+                                    <tr><td><strong>Line Count:</strong></td><td><%= parsedData.fileInfo.lineCount %></td></tr>
+                                    <% } %>
+                                </table>
                             </div>
                             <div class="col-md-6">
-                                <h6>Content Analysis</h6>
+                                <h6><i class="fas fa-info-circle me-2"></i>Content Analysis</h6>
+                                <% if (parsedData.segments && parsedData.segments.length > 0) { %>
+                                <p><strong>Data Types Detected:</strong></p>
                                 <ul class="list-unstyled">
-                                    <li><strong>Encoding issues:</strong> 
-                                        <span class="badge bg-<%= parsedData.statistics.encodingIssuesDetected ? 'warning' : 'success' %>">
-                                            <%= parsedData.statistics.encodingIssuesDetected ? 'Detected' : 'None' %>
-                                        </span>
-                                    </li>
-                                    <li><strong>Japanese text:</strong> 
-                                        <span class="badge bg-<%= parsedData.statistics.japaneseTextDetected ? 'info' : 'secondary' %>">
-                                            <%= parsedData.statistics.japaneseTextDetected ? 'Detected' : 'None' %>
-                                        </span>
-                                    </li>
-                                    <li><strong>Detected format:</strong> <%= parsedData.fileInfo.detectedFormat %></li>
-                                    <li><strong>Suggested encoding:</strong> <%= parsedData.fileInfo.encoding %></li>
+                                    <li><i class="fas fa-calendar text-primary"></i> Dates (YYYY/MM/DD format)</li>
+                                    <li><i class="fas fa-hashtag text-success"></i> Numeric IDs and quantities</li>
+                                    <li><i class="fas fa-barcode text-info"></i> Product codes (LK*, G*, PP*)</li>
+                                    <li><i class="fas fa-language text-warning"></i> Japanese text (properly decoded)</li>
+                                    <li><i class="fas fa-dollar-sign text-secondary"></i> Price values</li>
+                                    <li><i class="fas fa-shopping-cart text-success"></i> Order IDs (LK format)</li>
                                 </ul>
+                                
+                                <% const headerRow = parsedData.segments.find(s => s.type === 'HEADER'); %>
+                                <% if (headerRow) { %>
+                                <p><strong>Header Analysis:</strong></p>
+                                <small class="text-muted">
+                                    <%= headerRow.elements.length %> columns detected in header row<br>
+                                    Japanese field names properly decoded
+                                </small>
+                                <% } %>
+                                
+                                <% if (parsedData.orderManagement) { %>
+                                <p class="mt-3"><strong>Order Management:</strong></p>
+                                <small class="text-muted">
+                                    <%= parsedData.orderManagement.totalOrders %> orders identified with LK IDs<br>
+                                    Automatic duplicate detection and updates
+                                </small>
+                                <% } %>
+                                <% } %>
                             </div>
                         </div>
-
-                        <% if (parsedData.headers) { %>
-                        <h6 class="mt-4">Header Analysis</h6>
-                        <div class="table-responsive">
-                            <table class="table table-sm">
-                                <thead>
-                                    <tr>
-                                        <th>Index</th>
-                                        <th>Original Text</th>
-                                        <th>Possible Meaning</th>
-                                        <th>Issues</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <% if (parsedData.segments[0] && parsedData.segments[0].interpretedFields) { %>
-                                    <% Object.values(parsedData.segments[0].interpretedFields).forEach((field, index) => { %>
-                                    <tr>
-                                        <td><%= index %></td>
-                                        <td><code><%= field.originalText %></code></td>
-                                        <td><%= field.possibleMeaning %></td>
-                                        <td>
-                                            <% if (field.hasEncodingIssues) { %>
-                                            <span class="badge bg-warning">Encoding Issues</span>
-                                            <% } %>
-                                        </td>
-                                    </tr>
-                                    <% }); %>
-                                    <% } %>
-                                </tbody>
-                            </table>
-                        </div>
-                        <% } %>
                         <% } else { %>
-                        <div class="alert alert-info">
-                            <p>No analysis data available. The file may have parsing errors.</p>
+                        <div class="alert alert-warning">
+                            <p>No analysis data available.</p>
                         </div>
                         <% } %>
                     </div>
                 </div>
             </div>
+
+            <!-- Orders View -->
+            <% if (parsedData && parsedData.orderManagement) { %>
+            <div class="tab-pane fade" id="orders-view" role="tabpanel">
+                <div class="card mt-3">
+                    <div class="card-header bg-white">
+                        <h6 class="mb-0">
+                            <i class="fas fa-shopping-cart me-2"></i>Order Information
+                            <span class="badge bg-success"><%= parsedData.orderManagement.totalOrders %> orders</span>
+                        </h6>
+                    </div>
+                    <div class="card-body">
+                        <div class="row mb-4">
+                            <div class="col-md-3">
+                                <div class="text-center">
+                                    <h4 class="text-success"><%= parsedData.orderManagement.results.summary.new %></h4>
+                                    <small class="text-muted">New Orders</small>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="text-center">
+                                    <h4 class="text-warning"><%= parsedData.orderManagement.results.summary.updated %></h4>
+                                    <small class="text-muted">Updated Orders</small>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="text-center">
+                                    <h4 class="text-info"><%= parsedData.orderManagement.results.summary.unchanged %></h4>
+                                    <small class="text-muted">Unchanged Orders</small>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="text-center">
+                                    <h4 class="text-primary"><%= parsedData.orderManagement.totalOrders %></h4>
+                                    <small class="text-muted">Total Orders</small>
+                                </div>
+                            </div>
+                        </div>
+
+                        <% if (parsedData.orderManagement.results.newOrders.length > 0) { %>
+                        <div class="mb-3">
+                            <h6 class="text-success">New Orders Added:</h6>
+                            <div class="d-flex flex-wrap gap-2">
+                                <% parsedData.orderManagement.results.newOrders.forEach(orderId => { %>
+                                <span class="badge bg-success"><%= orderId %></span>
+                                <% }); %>
+                            </div>
+                        </div>
+                        <% } %>
+
+                        <% if (parsedData.orderManagement.results.updatedOrders.length > 0) { %>
+                        <div class="mb-3">
+                            <h6 class="text-warning">Updated Orders:</h6>
+                            <div class="d-flex flex-wrap gap-2">
+                                <% parsedData.orderManagement.results.updatedOrders.forEach(orderId => { %>
+                                <span class="badge bg-warning"><%= orderId %></span>
+                                <% }); %>
+                            </div>
+                        </div>
+                        <% } %>
+
+                        <div class="mt-4">
+                            <a href="/orders" class="btn btn-primary">
+                                <i class="fas fa-eye me-2"></i>View All Orders in System
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <% } %>
         </div>
     </div>
 
@@ -271,15 +458,106 @@
         function copyRawContent() {
             const content = document.getElementById('rawContent').textContent;
             navigator.clipboard.writeText(content).then(() => {
-                alert('Content copied to clipboard!');
+                showToast('Raw content copied to clipboard!');
             });
         }
 
-        // Make table cells expandable on click
-        document.querySelectorAll('.data-table td').forEach(cell => {
-            cell.addEventListener('click', function() {
-                this.style.whiteSpace = this.style.whiteSpace === 'normal' ? 'nowrap' : 'normal';
-                this.style.overflow = this.style.overflow === 'visible' ? 'hidden' : 'visible';
+        function exportToCSV() {
+            const table = document.getElementById('dataTable');
+            if (!table) return;
+            
+            let csv = '';
+            const rows = table.getElementsByTagName('tr');
+            
+            for (let i = 0; i < rows.length; i++) {
+                const cols = rows[i].getElementsByTagName('td');
+                const row = [];
+                
+                for (let j = 1; j < cols.length; j++) { // Skip first column (row number)
+                    const cellText = cols[j].textContent.trim();
+                    // Escape quotes and wrap in quotes if contains comma
+                    const escaped = cellText.includes(',') || cellText.includes('"') 
+                        ? '"' + cellText.replace(/"/g, '""') + '"'
+                        : cellText;
+                    row.push(escaped);
+                }
+                csv += row.join(',') + '\n';
+            }
+            
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = '<%= file.original_filename.replace(/\.[^/.]+$/, "") %>.csv';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+            
+            showToast('CSV exported successfully!');
+        }
+
+        let showColumnNumbers = false;
+        function toggleColumnNumbers() {
+            showColumnNumbers = !showColumnNumbers;
+            const table = document.getElementById('dataTable');
+            const headerRow = table.querySelector('.header-row');
+            
+            if (showColumnNumbers && headerRow) {
+                // Add column numbers to header
+                const cells = headerRow.getElementsByTagName('td');
+                for (let i = 1; i < cells.length; i++) {
+                    const originalText = cells[i].getAttribute('data-original-text') || cells[i].textContent;
+                    cells[i].setAttribute('data-original-text', originalText);
+                    cells[i].textContent = `[${i}] ${originalText}`;
+                }
+            } else if (headerRow) {
+                // Remove column numbers
+                const cells = headerRow.getElementsByTagName('td');
+                for (let i = 1; i < cells.length; i++) {
+                    const originalText = cells[i].getAttribute('data-original-text');
+                    if (originalText) {
+                        cells[i].textContent = originalText;
+                    }
+                }
+            }
+        }
+
+        function showToast(message) {
+            const toast = document.createElement('div');
+            toast.className = 'alert alert-success position-fixed';
+            toast.style.cssText = 'top: 20px; right: 20px; z-index: 9999; width: auto;';
+            toast.innerHTML = `<i class="fas fa-check me-2"></i>${message}`;
+            document.body.appendChild(toast);
+            
+            setTimeout(() => {
+                if (toast.parentNode) {
+                    document.body.removeChild(toast);
+                }
+            }, 3000);
+        }
+
+        // Make table cells expandable on click for better readability
+        document.addEventListener('DOMContentLoaded', function() {
+            const cells = document.querySelectorAll('.data-table td');
+            cells.forEach(cell => {
+                cell.addEventListener('click', function() {
+                    this.style.whiteSpace = this.style.whiteSpace === 'normal' ? 'nowrap' : 'normal';
+                    this.style.maxWidth = this.style.maxWidth === 'none' ? '120px' : 'none';
+                });
+            });
+
+            // Highlight order IDs on hover
+            const orderCells = document.querySelectorAll('.order-id');
+            orderCells.forEach(cell => {
+                cell.addEventListener('mouseenter', function() {
+                    this.style.transform = 'scale(1.1)';
+                    this.style.zIndex = '10';
+                });
+                cell.addEventListener('mouseleave', function() {
+                    this.style.transform = 'scale(1)';
+                    this.style.zIndex = 'auto';
+                });
             });
         });
     </script>

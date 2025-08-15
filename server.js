@@ -5,6 +5,7 @@ const bodyParser = require('body-parser');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 const { Pool } = require('pg');
+const fs = require('fs');
 let iconv;
 try {
   iconv = require('iconv-lite');
@@ -17,7 +18,7 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// PostgreSQL connection (Neon DB)
+// PostgreSQL connection
 const pool = new Pool({
   connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
@@ -35,7 +36,6 @@ app.use(fileUpload({
   tempFileDir: '/tmp/'
 }));
 
-// Session configuration
 app.use(session({
   secret: process.env.SESSION_SECRET || 'edi-parser-secret-key',
   resave: false,
@@ -46,7 +46,7 @@ app.use(session({
   }
 }));
 
-// Initialize database
+// Database initialization with order management
 async function initializeDB() {
   try {
     await pool.query(`
@@ -59,6 +59,7 @@ async function initializeDB() {
         ip_address INET
       )
     `);
+    
     await pool.query(`
       CREATE TABLE IF NOT EXISTS edi_files (
         id SERIAL PRIMARY KEY,
@@ -71,6 +72,7 @@ async function initializeDB() {
         file_size INTEGER
       )
     `);
+    
     await pool.query(`
       CREATE TABLE IF NOT EXISTS edi_changes (
         id SERIAL PRIMARY KEY,
@@ -82,7 +84,36 @@ async function initializeDB() {
         change_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    console.log('✅ Database tables initialized');
+
+    // New table for order management
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS edi_orders (
+        id SERIAL PRIMARY KEY,
+        order_id VARCHAR(50) UNIQUE NOT NULL,
+        order_data JSONB NOT NULL,
+        raw_segment TEXT,
+        created_by VARCHAR(20) NOT NULL,
+        updated_by VARCHAR(20),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Indexes for better performance
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_edi_orders_order_id ON edi_orders(order_id);
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_edi_orders_updated_at ON edi_orders(updated_at);
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_edi_files_uploaded_by ON edi_files(uploaded_by);
+    `);
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_user_logs_username ON user_logs(username);
+    `);
+
+    console.log('✅ Database tables initialized with order management');
   } catch (error) {
     console.error('❌ Database initialization error:', error);
   }
@@ -104,7 +135,6 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-// Logging function
 async function logUserActivity(username, userType, action, ipAddress) {
   try {
     await pool.query(
@@ -116,92 +146,37 @@ async function logUserActivity(username, userType, action, ipAddress) {
   }
 }
 
-// Enhanced debug EDI parser
+// Enhanced EDI parser
 function parseEDIData(ediContent) {
-  console.log('🔍 DEBUGGING EDI PARSER');
-  console.log('========================');
-  console.log('Input type:', typeof ediContent);
-  console.log('Input length:', ediContent ? ediContent.length : 'null/undefined');
-  console.log('Is string?', typeof ediContent === 'string');
+  console.log('🔍 Starting EDI parsing...');
+  console.log('📄 Content length:', ediContent ? ediContent.length : 'null');
   
   try {
-    if (!ediContent) {
-      console.log('❌ No content provided');
+    if (!ediContent || typeof ediContent !== 'string' || ediContent.trim().length === 0) {
       return { 
-        error: 'No content provided', 
-        message: 'File content is null or undefined',
+        error: 'Empty content', 
+        message: 'File content is empty or invalid',
         totalSegments: 0,
-        segments: [],
-        debugInfo: { step: 'content_check', input: 'null/undefined' }
+        segments: []
       };
     }
 
-    if (typeof ediContent !== 'string') {
-      console.log('❌ Content is not a string:', typeof ediContent);
-      return { 
-        error: 'Invalid content type', 
-        message: `Expected string, got ${typeof ediContent}`,
-        totalSegments: 0,
-        segments: [],
-        debugInfo: { step: 'type_check', type: typeof ediContent }
-      };
-    }
-
-    console.log('📄 First 100 characters:', JSON.stringify(ediContent.substring(0, 100)));
-    console.log('📄 Last 100 characters:', JSON.stringify(ediContent.substring(Math.max(0, ediContent.length - 100))));
-    
-    // Check for common line endings and separators
-    const hasLF = ediContent.includes('\n');
-    const hasCR = ediContent.includes('\r');
-    const hasTabs = ediContent.includes('\t');
-    const hasSpaces = ediContent.includes(' ');
-    
-    console.log('🔍 Content analysis:');
-    console.log('  - Has LF (\\n):', hasLF);
-    console.log('  - Has CR (\\r):', hasCR);
-    console.log('  - Has tabs:', hasTabs);
-    console.log('  - Has spaces:', hasSpaces);
-
-    // Clean content
-    let cleanContent = ediContent.trim();
+    const cleanContent = ediContent.trim();
     console.log('🧹 Cleaned length:', cleanContent.length);
+    console.log('📄 First 100 chars:', JSON.stringify(cleanContent.substring(0, 100)));
 
-    if (cleanContent.length === 0) {
-      console.log('❌ Content is empty after trimming');
+    // Split into lines
+    const lines = cleanContent.split(/\r?\n/).filter(line => line.trim().length > 0);
+    console.log('📊 Found lines:', lines.length);
+
+    if (lines.length === 0) {
       return {
-        error: 'Empty content',
-        message: 'File content is empty after trimming whitespace',
+        error: 'No data lines',
+        message: 'No parseable data lines found',
         totalSegments: 0,
-        segments: [],
-        debugInfo: { step: 'empty_after_trim', originalLength: ediContent.length }
+        segments: []
       };
     }
-
-    // Try different splitting methods
-    let lines = [];
-    let splitMethod = 'none';
-
-    // Method 1: Split by lines
-    if (hasLF || hasCR) {
-      lines = cleanContent.split(/\r?\n/).filter(line => line.trim().length > 0);
-      splitMethod = 'lines';
-      console.log('📊 Split by lines:', lines.length);
-    }
-
-    // Method 2: If no lines, treat as single line
-    if (lines.length <= 1) {
-      lines = [cleanContent];
-      splitMethod = 'single';
-      console.log('📊 Treating as single line');
-    }
-
-    console.log('📊 Final line count:', lines.length);
-    console.log('📊 Split method:', splitMethod);
-
-    // Show first few lines for debugging
-    lines.slice(0, 3).forEach((line, index) => {
-      console.log(`📝 Line ${index + 1} (${line.length} chars):`, JSON.stringify(line.substring(0, 50)) + '...');
-    });
 
     const parsed = {
       totalSegments: lines.length,
@@ -209,32 +184,17 @@ function parseEDIData(ediContent) {
       fileInfo: {
         originalLength: ediContent.length,
         cleanedLength: cleanContent.length,
-        detectedFormat: 'Tab-separated data',
+        detectedFormat: 'Tab-separated Japanese business data',
         lineCount: lines.length,
-        splitMethod: splitMethod,
-        hasTabSeparators: hasTabs,
-        debugInfo: {
-          hasLF, hasCR, hasTabs, hasSpaces
-        }
-      },
-      statistics: {
-        totalSegments: lines.length,
-        headerRows: 0,
-        dataRows: 0
+        encoding: 'Japanese (Shift_JIS/CP932)'
       }
     };
 
     // Process each line
     lines.forEach((line, index) => {
-      console.log(`🔄 Processing line ${index + 1}/${lines.length}`);
-      
       const trimmedLine = line.trim();
-      if (trimmedLine.length === 0) {
-        console.log(`⚠️ Line ${index + 1} is empty, skipping`);
-        return;
-      }
+      if (trimmedLine.length === 0) return;
 
-      // Try different separators
       let elements = [];
       let separator = 'none';
 
@@ -252,10 +212,9 @@ function parseEDIData(ediContent) {
         separator = 'none';
       }
 
-      console.log(`📊 Line ${index + 1}: ${elements.length} elements using ${separator} separator`);
-      console.log(`📊 Elements preview:`, elements.slice(0, 5).map(e => e.substring(0, 20)));
+      console.log(`📊 Line ${index + 1}: ${elements.length} elements (${separator})`);
 
-      const segmentData = {
+      parsed.segments.push({
         index: index + 1,
         type: index === 0 ? 'HEADER' : 'DATA',
         elements: elements,
@@ -263,43 +222,122 @@ function parseEDIData(ediContent) {
         elementCount: elements.length,
         separator: separator,
         isHeader: index === 0
-      };
-
-      if (index === 0) {
-        parsed.statistics.headerRows++;
-      } else {
-        parsed.statistics.dataRows++;
-      }
-
-      parsed.segments.push(segmentData);
+      });
     });
 
-    // Final statistics
-    parsed.statistics.averageElementsPerRow = parsed.segments.length > 0 
-      ? Math.round(parsed.segments.reduce((sum, s) => sum + s.elementCount, 0) / parsed.segments.length)
-      : 0;
+    parsed.statistics = {
+      totalSegments: parsed.segments.length,
+      headerRows: parsed.segments.filter(s => s.type === 'HEADER').length,
+      dataRows: parsed.segments.filter(s => s.type === 'DATA').length,
+      averageElementsPerRow: parsed.segments.length > 0 
+        ? Math.round(parsed.segments.reduce((sum, s) => sum + s.elementCount, 0) / parsed.segments.length)
+        : 0
+    };
 
     console.log('✅ Parsing completed successfully');
-    console.log('📊 Final statistics:', parsed.statistics);
-
+    console.log('📊 Statistics:', parsed.statistics);
     return parsed;
 
   } catch (error) {
-    console.error('❌ PARSING ERROR:', error);
-    console.error('❌ Error stack:', error.stack);
-    
+    console.error('❌ Parsing error:', error);
     return { 
       error: 'Parsing failed', 
       message: error.message,
       totalSegments: 0,
-      segments: [],
-      debugInfo: {
-        errorMessage: error.message,
-        errorStack: error.stack,
-        step: 'parsing_exception'
-      }
+      segments: []
     };
   }
+}
+
+// Order management functions
+function extractOrderInfo(segments) {
+  const orders = [];
+  
+  segments.forEach((segment, index) => {
+    if (segment.type === 'DATA' && segment.elements) {
+      // Find LK order ID (usually in early columns)
+      let orderID = null;
+      let orderData = {};
+      
+      segment.elements.forEach((element, colIndex) => {
+        // Look for LK pattern (order ID)
+        if (/^LK\d+/.test(element)) {
+          orderID = element;
+        }
+        // Store all data with column index
+        orderData[`col_${colIndex}`] = element;
+      });
+      
+      if (orderID) {
+        orders.push({
+          orderID: orderID,
+          rowIndex: index,
+          data: orderData,
+          rawSegment: segment.raw
+        });
+      }
+    }
+  });
+  
+  return orders;
+}
+
+async function processOrderUpdates(newOrders, uploadedBy) {
+  const results = {
+    newOrders: [],
+    updatedOrders: [],
+    unchangedOrders: [],
+    summary: {}
+  };
+  
+  for (const order of newOrders) {
+    try {
+      // Check if order exists in database
+      const existingOrder = await pool.query(
+        'SELECT * FROM edi_orders WHERE order_id = $1',
+        [order.orderID]
+      );
+      
+      if (existingOrder.rows.length === 0) {
+        // New order - insert
+        await pool.query(
+          `INSERT INTO edi_orders (order_id, order_data, raw_segment, created_by, created_at, updated_at) 
+           VALUES ($1, $2, $3, $4, NOW(), NOW())`,
+          [order.orderID, JSON.stringify(order.data), order.rawSegment, uploadedBy]
+        );
+        results.newOrders.push(order.orderID);
+      } else {
+        // Existing order - check if data changed
+        const existingData = existingOrder.rows[0].order_data;
+        const newDataString = JSON.stringify(order.data);
+        const existingDataString = JSON.stringify(existingData);
+        
+        if (newDataString !== existingDataString) {
+          // Data changed - update
+          await pool.query(
+            `UPDATE edi_orders SET order_data = $1, raw_segment = $2, updated_by = $3, updated_at = NOW() 
+             WHERE order_id = $4`,
+            [JSON.stringify(order.data), order.rawSegment, uploadedBy, order.orderID]
+          );
+          results.updatedOrders.push(order.orderID);
+        } else {
+          // No changes
+          results.unchangedOrders.push(order.orderID);
+        }
+      }
+    } catch (error) {
+      console.error(`❌ Error processing order ${order.orderID}:`, error);
+    }
+  }
+  
+  results.summary = {
+    total: newOrders.length,
+    new: results.newOrders.length,
+    updated: results.updatedOrders.length,
+    unchanged: results.unchangedOrders.length
+  };
+  
+  return results;
 }
 
 // Routes
@@ -358,139 +396,131 @@ app.get('/dashboard', requireAuth, async (req, res) => {
       'SELECT id, original_filename, upload_timestamp, uploaded_by, file_size FROM edi_files ORDER BY upload_timestamp DESC LIMIT 10'
     );
     
+    // Get order statistics
+    const orderStats = await pool.query(`
+      SELECT 
+        COUNT(*) as total_orders,
+        COUNT(CASE WHEN DATE(created_at) = CURRENT_DATE THEN 1 END) as orders_today,
+        COUNT(CASE WHEN DATE(updated_at) = CURRENT_DATE AND updated_by IS NOT NULL THEN 1 END) as updated_today
+      FROM edi_orders
+    `);
+    
     res.render('dashboard', { 
       user: req.session.user,
-      recentFiles: files.rows
+      recentFiles: files.rows,
+      orderStats: orderStats.rows[0] || { total_orders: 0, orders_today: 0, updated_today: 0 }
     });
   } catch (error) {
     console.error('Dashboard error:', error);
     res.render('dashboard', { 
       user: req.session.user,
       recentFiles: [],
+      orderStats: { total_orders: 0, orders_today: 0, updated_today: 0 },
       error: 'Error loading recent files'
     });
   }
 });
 
+// Enhanced upload route with Japanese encoding and order management
 app.post('/upload', requireAuth, async (req, res) => {
-  console.log('📤 UPLOAD REQUEST DEBUGGING');
-  console.log('============================');
+  console.log('📤 UPLOAD DEBUG - Japanese & Order Management');
+  console.log('==============================================');
   
   try {
     if (!req.files || !req.files.ediFile) {
-      console.log('❌ No files in request');
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
     const ediFile = req.files.ediFile;
     const clientIP = req.ip || req.connection.remoteAddress;
 
-    console.log('📁 File details:');
-    console.log('  - Name:', ediFile.name);
-    console.log('  - Size:', ediFile.size);
-    console.log('  - Mimetype:', ediFile.mimetype);
-    console.log('  - Data type:', typeof ediFile.data);
-    console.log('  - Data is Buffer?', Buffer.isBuffer(ediFile.data));
-    console.log('  - Has tempFilePath?', !!ediFile.tempFilePath);
-    console.log('  - TempFilePath:', ediFile.tempFilePath);
+    console.log('📁 File info:');
+    console.log('  Name:', ediFile.name);
+    console.log('  Size:', ediFile.size);
+    console.log('  Has data buffer:', !!ediFile.data);
+    console.log('  Data buffer length:', ediFile.data ? ediFile.data.length : 0);
+    console.log('  Has temp path:', !!ediFile.tempFilePath);
+    console.log('  Temp path:', ediFile.tempFilePath);
 
     // Validate file
     const fileName = ediFile.name.toLowerCase();
     if (!fileName.endsWith('.edidat') && !fileName.endsWith('.edi') && !fileName.endsWith('.txt')) {
       return res.status(400).json({ 
-        error: 'Invalid file type. Please upload .EDIdat, .edi, or .txt files only' 
+        error: 'Invalid file type. Upload .EDIdat, .edi, or .txt files only' 
       });
     }
 
     if (ediFile.size > 50 * 1024 * 1024) {
-      return res.status(400).json({ error: 'File too large. Maximum size is 50MB' });
+      return res.status(400).json({ error: 'File too large. Max 50MB' });
     }
 
-    // Enhanced file reading - handle both memory and temp file scenarios
+    // Read file content - handle both data buffer and temp file
     let rawBytes = null;
     let fileContent = null;
     
-    console.log('🔍 File data access strategy:');
-    
-    // Strategy 1: Try direct data buffer first
+    // Try data buffer first
     if (ediFile.data && ediFile.data.length > 0) {
-      console.log('📁 Using direct data buffer');
+      console.log('📁 Using data buffer');
       rawBytes = ediFile.data;
     }
-    // Strategy 2: Read from temp file if data is empty but temp file exists
-    else if (ediFile.tempFilePath) {
-      console.log('📁 Reading from temp file:', ediFile.tempFilePath);
+    // Fallback to temp file
+    else if (ediFile.tempFilePath && fs.existsSync(ediFile.tempFilePath)) {
+      console.log('📁 Reading temp file:', ediFile.tempFilePath);
       try {
-        const fs = require('fs');
         rawBytes = fs.readFileSync(ediFile.tempFilePath);
-        console.log('✅ Temp file read successful, length:', rawBytes.length);
+        console.log('✅ Temp file read success, length:', rawBytes.length);
       } catch (tempError) {
-        console.error('❌ Temp file read failed:', tempError.message);
+        console.error('❌ Temp file read failed:', tempError);
         return res.status(400).json({ 
-          error: 'Unable to read uploaded file from temp location',
+          error: 'Cannot read uploaded file',
           details: tempError.message
         });
       }
-    }
-    // Strategy 3: Try to access file through mv() method
-    else {
-      console.log('📁 Attempting to access file through alternative method');
+    } else {
       return res.status(400).json({ 
-        error: 'No file data available. File may be corrupted or upload incomplete.'
+        error: 'File data not accessible',
+        debug: {
+          hasData: !!ediFile.data,
+          hasTemp: !!ediFile.tempFilePath,
+          dataLen: ediFile.data ? ediFile.data.length : 0
+        }
       });
     }
 
     if (!rawBytes || rawBytes.length === 0) {
-      console.log('❌ No bytes available after all strategies');
-      return res.status(400).json({ 
-        error: 'File appears to be empty or unreadable',
-        debug: {
-          hasData: !!ediFile.data,
-          dataLength: ediFile.data ? ediFile.data.length : 0,
-          hasTempPath: !!ediFile.tempFilePath,
-          reportedSize: ediFile.size
-        }
-      });
+      return res.status(400).json({ error: 'File appears empty' });
     }
-    
-    console.log('🔍 Raw file analysis:');
-    console.log('  - Raw bytes length:', rawBytes.length);
-    console.log('  - First 50 bytes (hex):', rawBytes.slice(0, 50).toString('hex'));
-    console.log('  - First 50 bytes (utf8):', rawBytes.slice(0, 50).toString('utf8'));
 
-    // Try different encoding approaches
+    console.log('📊 Raw bytes length:', rawBytes.length);
+    console.log('📊 First 50 bytes (hex):', rawBytes.slice(0, 50).toString('hex'));
+
+    // ENHANCED JAPANESE ENCODING DETECTION
     try {
-      // Method 1: Simple UTF-8
-      console.log('🔄 Trying UTF-8...');
-      fileContent = rawBytes.toString('utf8');
-      console.log('✅ UTF-8 successful, length:', fileContent.length);
-      console.log('📄 UTF-8 preview:', JSON.stringify(fileContent.substring(0, 100)));
+      fileContent = null;
       
-      // Check if UTF-8 looks reasonable
-      const hasReplacementChars = (fileContent.match(/�/g) || []).length;
-      const replacementRatio = hasReplacementChars / fileContent.length;
-      
-      console.log('🔍 UTF-8 quality check:');
-      console.log('  - Replacement chars:', hasReplacementChars);
-      console.log('  - Replacement ratio:', replacementRatio.toFixed(3));
-      
-      // If too many replacement characters, try other encodings
-      if (replacementRatio > 0.1 && iconv) {
-        console.log('⚠️ Too many replacement chars, trying other encodings...');
+      // First try Japanese encodings since we know this is Japanese data
+      if (iconv) {
+        console.log('🇯🇵 Trying Japanese encodings first...');
+        const japaneseEncodings = ['shift_jis', 'cp932', 'euc-jp', 'iso-2022-jp'];
         
-        const encodingsToTry = ['shift_jis', 'euc-jp', 'iso-2022-jp', 'cp932'];
-        
-        for (const encoding of encodingsToTry) {
+        for (const encoding of japaneseEncodings) {
           try {
-            console.log(`🔄 Trying ${encoding}...`);
             const decoded = iconv.decode(rawBytes, encoding);
-            console.log(`✅ ${encoding} successful, length:`, decoded.length);
-            console.log(`📄 ${encoding} preview:`, JSON.stringify(decoded.substring(0, 100)));
+            console.log(`📊 ${encoding}: length ${decoded.length}`);
             
-            // Check if this encoding looks better
-            const replacementCount = (decoded.match(/�/g) || []).length;
-            if (replacementCount < hasReplacementChars) {
-              console.log(`✅ ${encoding} looks better, using it`);
+            // Check if this looks like good Japanese text
+            const hasJapanese = /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF]/.test(decoded);
+            const replacementChars = (decoded.match(/�/g) || []).length;
+            const replacementRatio = replacementChars / decoded.length;
+            
+            console.log(`📊 ${encoding}: Japanese chars: ${hasJapanese}, replacements: ${replacementChars}, ratio: ${replacementRatio.toFixed(3)}`);
+            
+            if (hasJapanese && replacementRatio < 0.01) {
+              console.log(`✅ ${encoding} looks perfect for Japanese text!`);
+              fileContent = decoded;
+              break;
+            } else if (replacementRatio < 0.02) {
+              console.log(`✅ ${encoding} looks good, using it`);
               fileContent = decoded;
               break;
             }
@@ -500,35 +530,50 @@ app.post('/upload', requireAuth, async (req, res) => {
         }
       }
       
+      // Fallback to UTF-8 if no Japanese encoding worked
+      if (!fileContent) {
+        console.log('🔄 Falling back to UTF-8...');
+        fileContent = rawBytes.toString('utf8');
+      }
+      
+      console.log('✅ Final encoding successful, length:', fileContent.length);
+      
     } catch (encodingError) {
       console.error('❌ All encoding attempts failed:', encodingError);
       return res.status(400).json({ 
-        error: 'Unable to read file content. Please check file encoding.',
+        error: 'File encoding not supported',
         details: encodingError.message
       });
     }
 
     if (!fileContent || fileContent.length === 0) {
-      console.log('❌ No file content after encoding attempts');
-      return res.status(400).json({ 
-        error: 'Could not read file content with any encoding',
-        debug: {
-          rawBytesLength: rawBytes.length,
-          encodingAttempted: true
-        }
-      });
+      return res.status(400).json({ error: 'Could not decode file content' });
     }
 
-    console.log('✅ Final file content length:', fileContent.length);
-    console.log('📄 Final content preview (first 200 chars):', JSON.stringify(fileContent.substring(0, 200)));
+    console.log('✅ Final content length:', fileContent.length);
+    console.log('📄 Content preview:', JSON.stringify(fileContent.substring(0, 100)));
 
-    // Parse the data
-    console.log('🔄 Starting parsing...');
+    // Parse data
+    console.log('🔄 Parsing...');
     const parsedData = parseEDIData(fileContent);
-    console.log('✅ Parsing completed');
+    console.log('✅ Parse complete');
+
+    // Extract and process orders
+    console.log('🔄 Processing orders...');
+    const extractedOrders = extractOrderInfo(parsedData.segments || []);
+    console.log(`📊 Found ${extractedOrders.length} orders with LK IDs`);
+
+    // Process order updates
+    const orderResults = await processOrderUpdates(extractedOrders, req.session.user.username);
+    console.log('📊 Order processing results:', orderResults.summary);
+
+    // Add order info to parsed data
+    parsedData.orderManagement = {
+      totalOrders: extractedOrders.length,
+      results: orderResults
+    };
 
     // Save to database
-    console.log('🔄 Saving to database...');
     const result = await pool.query(
       `INSERT INTO edi_files (filename, original_filename, file_content, parsed_data, uploaded_by, file_size) 
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
@@ -544,70 +589,85 @@ app.post('/upload', requireAuth, async (req, res) => {
 
     await logUserActivity(req.session.user.username, req.session.user.type, 'file_upload', clientIP);
 
-    console.log('✅ Upload and parsing completed successfully');
-    console.log('📊 Final parsed data summary:', {
-      totalSegments: parsedData.totalSegments,
-      hasError: !!parsedData.error,
-      segmentsCount: parsedData.segments ? parsedData.segments.length : 0
-    });
+    console.log('✅ Upload complete, file ID:', result.rows[0].id);
 
     res.json({
       success: true,
       fileId: result.rows[0].id,
-      message: 'File uploaded and parsed successfully',
+      message: `File uploaded successfully. Orders: ${orderResults.summary.new} new, ${orderResults.summary.updated} updated, ${orderResults.summary.unchanged} unchanged`,
       parsedData: parsedData,
+      orderSummary: orderResults.summary,
       stats: {
         originalSize: ediFile.size,
         segmentCount: parsedData.totalSegments || 0,
+        orderCount: extractedOrders.length,
+        newOrders: orderResults.summary.new,
+        updatedOrders: orderResults.summary.updated,
         hasParsingErrors: !!parsedData.error
       }
     });
 
   } catch (error) {
-    console.error('❌ UPLOAD ERROR:', error);
-    console.error('❌ Error stack:', error.stack);
+    console.error('❌ Upload error:', error);
     res.status(500).json({ 
-      error: 'File upload failed', 
-      message: error.message,
-      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      error: 'Upload failed', 
+      message: error.message
     });
   }
 });
 
-);
-
 app.get('/file/:id', requireAuth, async (req, res) => {
   try {
-    const fileId = req.params.id;
-    console.log('📄 Loading file ID:', fileId);
-    
-    const result = await pool.query('SELECT * FROM edi_files WHERE id = $1', [fileId]);
-
+    const result = await pool.query('SELECT * FROM edi_files WHERE id = $1', [req.params.id]);
     if (result.rows.length === 0) {
-      console.log('❌ File not found:', fileId);
       return res.status(404).render('error', { 
         message: 'File not found',
         user: req.session.user 
       });
     }
-
-    const file = result.rows[0];
-    console.log('✅ File loaded:');
-    console.log('  - Original filename:', file.original_filename);
-    console.log('  - Content length:', file.file_content ? file.file_content.length : 'null');
-    console.log('  - Parsed data type:', typeof file.parsed_data);
-    console.log('  - Parsed data preview:', JSON.stringify(file.parsed_data).substring(0, 200));
-
     res.render('file-view', {
       user: req.session.user,
-      file: file,
-      parsedData: file.parsed_data
+      file: result.rows[0],
+      parsedData: result.rows[0].parsed_data
     });
-
   } catch (error) {
-    console.error('❌ File view error:', error);
+    console.error('File view error:', error);
     res.render('error', { 
-      message: 'Error loading file: ' + error.message,
+      message: 'Error loading file',
+      user: req.session.user 
+    });
+  }
+});
+
+// New route for order management
+app.get('/orders', requireAuth, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = 50;
+    const offset = (page - 1) * limit;
+    
+    const orders = await pool.query(`
+      SELECT order_id, order_data, created_by, updated_by, created_at, updated_at
+      FROM edi_orders 
+      ORDER BY updated_at DESC 
+      LIMIT $1 OFFSET $2
+    `, [limit, offset]);
+    
+    const totalCount = await pool.query('SELECT COUNT(*) FROM edi_orders');
+    const total = parseInt(totalCount.rows[0].count);
+    const totalPages = Math.ceil(total / limit);
+    
+    res.render('orders', {
+      user: req.session.user,
+      orders: orders.rows,
+      currentPage: page,
+      totalPages: totalPages,
+      total: total
+    });
+  } catch (error) {
+    console.error('Orders view error:', error);
+    res.render('error', { 
+      message: 'Error loading orders',
       user: req.session.user 
     });
   }
@@ -631,18 +691,16 @@ app.get('/logs', requireAdmin, async (req, res) => {
   }
 });
 
-// Health check
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    features: ['debug_logging', 'enhanced_encoding', 'japanese_support']
+    features: ['japanese_encoding', 'order_management', 'temp_file_support']
   });
 });
 
-// Error handling
 app.use((err, req, res, next) => {
-  console.error('❌ Unhandled error:', err.stack);
+  console.error('❌ Error:', err.stack);
   res.status(500).render('error', { 
     message: 'Something went wrong!',
     user: req.session.user
@@ -656,12 +714,11 @@ app.use((req, res) => {
   });
 });
 
-// Start server
 app.listen(PORT, async () => {
-  console.log(`🚀 DEBUG EDI Parser Server running on port ${PORT}`);
+  console.log(`🚀 EDI Parser Server with Order Management running on port ${PORT}`);
   console.log(`🌐 Access: http://localhost:${PORT}`);
   console.log(`🗄️  Database: Neon PostgreSQL`);
-  console.log(`🔍 Debug mode: Enhanced logging enabled`);
+  console.log(`🇯🇵 Features: Japanese encoding, Order management, Temp file support`);
   await initializeDB();
 });
 
