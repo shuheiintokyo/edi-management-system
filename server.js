@@ -391,6 +391,8 @@ app.post('/upload', requireAuth, async (req, res) => {
     console.log('  - Mimetype:', ediFile.mimetype);
     console.log('  - Data type:', typeof ediFile.data);
     console.log('  - Data is Buffer?', Buffer.isBuffer(ediFile.data));
+    console.log('  - Has tempFilePath?', !!ediFile.tempFilePath);
+    console.log('  - TempFilePath:', ediFile.tempFilePath);
 
     // Validate file
     const fileName = ediFile.name.toLowerCase();
@@ -404,9 +406,52 @@ app.post('/upload', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'File too large. Maximum size is 50MB' });
     }
 
-    // Enhanced file reading with extensive debugging
+    // Enhanced file reading - handle both memory and temp file scenarios
+    let rawBytes = null;
     let fileContent = null;
-    const rawBytes = ediFile.data;
+    
+    console.log('🔍 File data access strategy:');
+    
+    // Strategy 1: Try direct data buffer first
+    if (ediFile.data && ediFile.data.length > 0) {
+      console.log('📁 Using direct data buffer');
+      rawBytes = ediFile.data;
+    }
+    // Strategy 2: Read from temp file if data is empty but temp file exists
+    else if (ediFile.tempFilePath) {
+      console.log('📁 Reading from temp file:', ediFile.tempFilePath);
+      try {
+        const fs = require('fs');
+        rawBytes = fs.readFileSync(ediFile.tempFilePath);
+        console.log('✅ Temp file read successful, length:', rawBytes.length);
+      } catch (tempError) {
+        console.error('❌ Temp file read failed:', tempError.message);
+        return res.status(400).json({ 
+          error: 'Unable to read uploaded file from temp location',
+          details: tempError.message
+        });
+      }
+    }
+    // Strategy 3: Try to access file through mv() method
+    else {
+      console.log('📁 Attempting to access file through alternative method');
+      return res.status(400).json({ 
+        error: 'No file data available. File may be corrupted or upload incomplete.'
+      });
+    }
+
+    if (!rawBytes || rawBytes.length === 0) {
+      console.log('❌ No bytes available after all strategies');
+      return res.status(400).json({ 
+        error: 'File appears to be empty or unreadable',
+        debug: {
+          hasData: !!ediFile.data,
+          dataLength: ediFile.data ? ediFile.data.length : 0,
+          hasTempPath: !!ediFile.tempFilePath,
+          reportedSize: ediFile.size
+        }
+      });
+    }
     
     console.log('🔍 Raw file analysis:');
     console.log('  - Raw bytes length:', rawBytes.length);
@@ -463,14 +508,19 @@ app.post('/upload', requireAuth, async (req, res) => {
       });
     }
 
-    if (!fileContent) {
-      console.log('❌ No file content after all encoding attempts');
-      return res.status(400).json({ error: 'Could not read file content with any encoding' });
+    if (!fileContent || fileContent.length === 0) {
+      console.log('❌ No file content after encoding attempts');
+      return res.status(400).json({ 
+        error: 'Could not read file content with any encoding',
+        debug: {
+          rawBytesLength: rawBytes.length,
+          encodingAttempted: true
+        }
+      });
     }
 
     console.log('✅ Final file content length:', fileContent.length);
     console.log('📄 Final content preview (first 200 chars):', JSON.stringify(fileContent.substring(0, 200)));
-    console.log('📄 Final content preview (last 200 chars):', JSON.stringify(fileContent.substring(Math.max(0, fileContent.length - 200))));
 
     // Parse the data
     console.log('🔄 Starting parsing...');
@@ -523,6 +573,8 @@ app.post('/upload', requireAuth, async (req, res) => {
     });
   }
 });
+
+);
 
 app.get('/file/:id', requireAuth, async (req, res) => {
   try {
