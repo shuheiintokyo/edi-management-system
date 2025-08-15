@@ -1,0 +1,613 @@
+const express = require('express');
+const session = require('express-session');
+const fileUpload = require('express-fileupload');
+const bodyParser = require('body-parser');
+const path = require('path');
+const bcrypt = require('bcryptjs');
+const { Pool } = require('pg');
+const iconv = require('iconv-lite');
+require('dotenv').config();
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// PostgreSQL connection (Neon DB)
+const pool = new Pool({
+  connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
+
+// Middleware
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.json());
+app.use(fileUpload({
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max file size
+  useTempFiles: true,
+  tempFileDir: '/tmp/'
+}));
+
+// Session configuration
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'edi-parser-secret-key',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { 
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+  }
+}));
+
+// Initialize database tables
+async function initializeDB() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_logs (
+        id SERIAL PRIMARY KEY,
+        username VARCHAR(20) NOT NULL,
+        user_type VARCHAR(10) NOT NULL,
+        action VARCHAR(50) NOT NULL,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        ip_address INET
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS edi_files (
+        id SERIAL PRIMARY KEY,
+        filename VARCHAR(255) NOT NULL,
+        original_filename VARCHAR(255) NOT NULL,
+        file_content TEXT NOT NULL,
+        parsed_data JSONB,
+        uploaded_by VARCHAR(20) NOT NULL,
+        upload_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        file_size INTEGER
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS edi_changes (
+        id SERIAL PRIMARY KEY,
+        file_id INTEGER REFERENCES edi_files(id),
+        change_type VARCHAR(50) NOT NULL,
+        old_data JSONB,
+        new_data JSONB,
+        changed_by VARCHAR(20) NOT NULL,
+        change_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    console.log('✅ Database tables initialized successfully');
+  } catch (error) {
+    console.error('❌ Error initializing database:', error);
+  }
+}
+
+// Authentication middleware
+function requireAuth(req, res, next) {
+  if (!req.session.user) {
+    return res.redirect('/login');
+  }
+  next();
+}
+
+function requireAdmin(req, res, next) {
+  if (!req.session.user || req.session.user.type !== 'admin') {
+    return res.status(403).render('error', { 
+      message: 'Access denied. Admin privileges required.',
+      user: req.session.user 
+    });
+  }
+  next();
+}
+
+// Logging function
+async function logUserActivity(username, userType, action, ipAddress) {
+  try {
+    await pool.query(
+      'INSERT INTO user_logs (username, user_type, action, ip_address) VALUES ($1, $2, $3, $4)',
+      [username, userType, action, ipAddress]
+    );
+  } catch (error) {
+    console.error('Error logging user activity:', error);
+  }
+}
+
+// Helper function to interpret header fields
+function interpretHeaderFields(headerElements) {
+  const fieldMappings = {
+    0: 'データ種別 (Data Type)',
+    1: 'コード (Code)', 
+    2: 'データ作成日 (Data Creation Date)',
+    3: 'コード (Code)',
+    4: 'ユーザーコード (User Code)',
+    5: '製品コード (Product Code)',
+    6: '数量 (Quantity)',
+    7: '単価 (Unit Price)',
+    8: '金額 (Amount)',
+    9: '日付 (Date)',
+    10: 'ステータス (Status)'
+  };
+
+  const interpreted = {};
+  headerElements.forEach((element, index) => {
+    interpreted[index] = {
+      originalText: element,
+      possibleMeaning: fieldMappings[index] || `Field ${index + 1}`,
+      hasEncodingIssues: /[àáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ]/.test(element)
+    };
+  });
+
+  return interpreted;
+}
+
+// Helper function to interpret data rows
+function interpretDataRow(dataElements, headers) {
+  const interpreted = {};
+  
+  dataElements.forEach((element, index) => {
+    const fieldInfo = {
+      value: element,
+      index: index,
+      headerText: headers ? headers[index] : null
+    };
+
+    // Try to identify data types
+    if (/^\d+$/.test(element)) {
+      fieldInfo.dataType = 'integer';
+      fieldInfo.numericValue = parseInt(element);
+    } else if (/^\d+\.\d+$/.test(element)) {
+      fieldInfo.dataType = 'decimal';
+      fieldInfo.numericValue = parseFloat(element);
+    } else if (/^\d{4}\/\d{2}\/\d{2}$/.test(element)) {
+      fieldInfo.dataType = 'date';
+      fieldInfo.dateValue = new Date(element);
+    } else if (/^[A-Z]{2}\d+/.test(element)) {
+      fieldInfo.dataType = 'product_code';
+    } else if (/^LK\d+/.test(element)) {
+      fieldInfo.dataType = 'lot_number';
+    } else if (/^G\d+[A-Z\-]+/.test(element)) {
+      fieldInfo.dataType = 'group_code';
+    } else if (element.length > 10 && /[àáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ]/.test(element)) {
+      fieldInfo.dataType = 'japanese_text_encoded';
+      fieldInfo.needsDecoding = true;
+    } else {
+      fieldInfo.dataType = 'string';
+    }
+
+    interpreted[index] = fieldInfo;
+  });
+
+  return interpreted;
+}
+
+// Enhanced Japanese EDI Parser function
+function parseEDIData(ediContent) {
+  try {
+    console.log('🔍 Starting Japanese EDI parsing...');
+    console.log('📄 File content length:', ediContent.length);
+    console.log('📄 First 200 characters:', ediContent.substring(0, 200));
+    
+    if (!ediContent || ediContent.trim().length === 0) {
+      return { 
+        error: 'Empty file content', 
+        message: 'The uploaded file appears to be empty or unreadable',
+        totalSegments: 0,
+        segments: []
+      };
+    }
+
+    // Clean and normalize the content
+    let cleanContent = ediContent
+      .replace(/\r\n/g, '\n')  // Normalize line endings
+      .replace(/\r/g, '\n')    // Handle old Mac line endings
+      .trim();
+
+    console.log('🧹 Cleaned content length:', cleanContent.length);
+
+    // Split into lines (each line is a record/segment)
+    const lines = cleanContent.split('\n').filter(line => line.trim().length > 0);
+    console.log('📊 Found lines:', lines.length);
+
+    if (lines.length === 0) {
+      return {
+        error: 'No data lines found',
+        message: 'The file contains no parseable data lines',
+        totalSegments: 0,
+        segments: []
+      };
+    }
+
+    const parsed = {
+      totalSegments: lines.length,
+      segments: [],
+      fileInfo: {
+        originalLength: ediContent.length,
+        cleanedLength: cleanContent.length,
+        detectedFormat: 'Japanese Tab-Separated EDI',
+        encoding: 'Likely Shift_JIS/JIS (converted to UTF-8)',
+        lineCount: lines.length
+      },
+      headers: null,
+      dataRows: []
+    };
+
+    // Process each line
+    lines.forEach((line, index) => {
+      const trimmedLine = line.trim();
+      if (trimmedLine.length === 0) return;
+
+      // Split by tab characters (most likely separator for Japanese business data)
+      let elements = trimmedLine.split('\t');
+      
+      // If no tabs, try other separators
+      if (elements.length === 1) {
+        // Try double spaces
+        if (trimmedLine.includes('  ')) {
+          elements = trimmedLine.split(/\s{2,}/).filter(e => e.trim().length > 0);
+        }
+        // Try single tab or space
+        else if (trimmedLine.includes(' ')) {
+          elements = trimmedLine.split(/\s+/);
+        }
+        // Try comma
+        else if (trimmedLine.includes(',')) {
+          elements = trimmedLine.split(',');
+        }
+        // If still no separation, treat as single element
+        else {
+          elements = [trimmedLine];
+        }
+      }
+
+      // Clean up elements
+      elements = elements.map(el => el.trim()).filter(el => el.length > 0);
+
+      const segmentData = {
+        index: index + 1,
+        type: index === 0 ? 'HEADER' : 'DATA',
+        elements: elements,
+        raw: trimmedLine,
+        elementCount: elements.length,
+        isHeader: index === 0,
+        containsJapanese: /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF]/.test(trimmedLine),
+        containsEncodingIssues: /[àáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ]/.test(trimmedLine)
+      };
+
+      // If this is the first line and looks like headers, mark it
+      if (index === 0 && (segmentData.containsEncodingIssues || elements.length > 10)) {
+        parsed.headers = elements;
+        segmentData.type = 'HEADER';
+        segmentData.interpretedFields = interpretHeaderFields(elements);
+      } else {
+        // This is a data row
+        segmentData.type = 'DATA';
+        segmentData.interpretedData = interpretDataRow(elements, parsed.headers);
+        parsed.dataRows.push(segmentData);
+      }
+
+      parsed.segments.push(segmentData);
+    });
+
+    // Add summary statistics
+    parsed.statistics = {
+      totalSegments: parsed.segments.length,
+      headerRows: parsed.segments.filter(s => s.type === 'HEADER').length,
+      dataRows: parsed.segments.filter(s => s.type === 'DATA').length,
+      averageElementsPerRow: Math.round(
+        parsed.segments.reduce((sum, s) => sum + s.elementCount, 0) / parsed.segments.length
+      ),
+      encodingIssuesDetected: parsed.segments.some(s => s.containsEncodingIssues),
+      japaneseTextDetected: parsed.segments.some(s => s.containsJapanese),
+      maxElementsInRow: Math.max(...parsed.segments.map(s => s.elementCount)),
+      minElementsInRow: Math.min(...parsed.segments.map(s => s.elementCount))
+    };
+
+    console.log('✅ Japanese EDI parsing completed successfully');
+    console.log('📊 Statistics:', parsed.statistics);
+
+    return parsed;
+
+  } catch (error) {
+    console.error('❌ Error parsing Japanese EDI data:', error);
+    return { 
+      error: 'Failed to parse Japanese EDI data', 
+      message: error.message,
+      totalSegments: 0,
+      segments: [],
+      debugInfo: {
+        contentLength: ediContent?.length || 0,
+        contentPreview: ediContent?.substring(0, 100) || 'No content'
+      }
+    };
+  }
+}
+
+// Routes
+app.get('/', (req, res) => {
+  if (req.session.user) {
+    res.redirect('/dashboard');
+  } else {
+    res.redirect('/login');
+  }
+});
+
+app.get('/login', (req, res) => {
+  res.render('login', { error: null });
+});
+
+app.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+  const clientIP = req.ip || req.connection.remoteAddress;
+
+  try {
+    if (username === 'admin') {
+      if (/^\d{4}$/.test(password)) {
+        req.session.user = { username: 'admin', type: 'admin' };
+        await logUserActivity('admin', 'admin', 'login', clientIP);
+        res.redirect('/dashboard');
+      } else {
+        res.render('login', { error: 'Admin password must be 4 digits' });
+      }
+    } else {
+      if (/^[a-zA-Z0-9]{1,20}$/.test(username) && username.length <= 20) {
+        req.session.user = { username: username, type: 'user' };
+        await logUserActivity(username, 'user', 'login', clientIP);
+        res.redirect('/dashboard');
+      } else {
+        res.render('login', { error: 'Username must be 1-20 characters (letters and numbers only)' });
+      }
+    }
+  } catch (error) {
+    console.error('Login error:', error);
+    res.render('login', { error: 'Login failed. Please try again.' });
+  }
+});
+
+app.get('/logout', async (req, res) => {
+  if (req.session.user) {
+    const clientIP = req.ip || req.connection.remoteAddress;
+    await logUserActivity(req.session.user.username, req.session.user.type, 'logout', clientIP);
+    req.session.destroy();
+  }
+  res.redirect('/login');
+});
+
+app.get('/dashboard', requireAuth, async (req, res) => {
+  try {
+    const files = await pool.query(
+      'SELECT id, original_filename, upload_timestamp, uploaded_by, file_size FROM edi_files ORDER BY upload_timestamp DESC LIMIT 10'
+    );
+    
+    res.render('dashboard', { 
+      user: req.session.user,
+      recentFiles: files.rows
+    });
+  } catch (error) {
+    console.error('Dashboard error:', error);
+    res.render('dashboard', { 
+      user: req.session.user,
+      recentFiles: [],
+      error: 'Error loading recent files'
+    });
+  }
+});
+
+app.post('/upload', requireAuth, async (req, res) => {
+  try {
+    console.log('📤 Upload request received');
+    
+    if (!req.files || !req.files.ediFile) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const ediFile = req.files.ediFile;
+    const clientIP = req.ip || req.connection.remoteAddress;
+
+    console.log('📁 File details:', {
+      name: ediFile.name,
+      size: ediFile.size,
+      mimetype: ediFile.mimetype
+    });
+
+    // Validate file extension (allow .edidat, .edi, .txt)
+    const fileName = ediFile.name.toLowerCase();
+    if (!fileName.endsWith('.edidat') && !fileName.endsWith('.edi') && !fileName.endsWith('.txt')) {
+      return res.status(400).json({ 
+        error: 'Invalid file type. Please upload .EDIdat, .edi, or .txt files only' 
+      });
+    }
+
+    // Validate file size
+    if (ediFile.size > 50 * 1024 * 1024) {
+      return res.status(400).json({ 
+        error: 'File too large. Maximum size is 50MB' 
+      });
+    }
+
+    // Enhanced encoding detection and conversion for Japanese files
+    let fileContent;
+    try {
+      const rawBytes = ediFile.data;
+      
+      // Try different Japanese encodings
+      const encodingsToTry = [
+        'utf8',        // UTF-8 (if already converted)
+        'shift_jis',   // Shift_JIS (most common in Japanese business)
+        'euc-jp',      // EUC-JP
+        'iso-2022-jp', // JIS
+        'cp932',       // Windows Japanese
+        'latin1'       // Fallback
+      ];
+      
+      console.log('🔍 Trying different encodings for Japanese text...');
+      
+      for (const encoding of encodingsToTry) {
+        try {
+          if (encoding === 'utf8') {
+            fileContent = rawBytes.toString('utf8');
+          } else {
+            fileContent = iconv.decode(rawBytes, encoding);
+          }
+          
+          // Check if this encoding produces readable content
+          const hasReasonableLength = fileContent.length > 0;
+          const hasTabsOrNewlines = fileContent.includes('\t') || fileContent.includes('\n');
+          const notTooManyReplacementChars = (fileContent.match(/�/g) || []).length < fileContent.length * 0.1;
+          
+          if (hasReasonableLength && hasTabsOrNewlines && notTooManyReplacementChars) {
+            console.log(`✅ Successfully decoded with ${encoding}`);
+            console.log(`📄 Content preview: ${fileContent.substring(0, 100)}`);
+            break;
+          }
+        } catch (err) {
+          console.log(`❌ Failed to decode with ${encoding}: ${err.message}`);
+          continue;
+        }
+      }
+      
+      if (!fileContent) {
+        console.log('⚠️ All encodings failed, using UTF-8 as fallback');
+        fileContent = rawBytes.toString('utf8');
+      }
+      
+    } catch (encodingError) {
+      console.error('❌ File encoding error:', encodingError);
+      return res.status(400).json({ 
+        error: 'Unable to read file content. Please check file encoding.' 
+      });
+    }
+    
+    // Parse EDI data with Japanese-aware parser
+    const parsedData = parseEDIData(fileContent);
+
+    // Save to database
+    const result = await pool.query(
+      `INSERT INTO edi_files (filename, original_filename, file_content, parsed_data, uploaded_by, file_size) 
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [
+        ediFile.name.replace(/[^a-zA-Z0-9.-]/g, '_'),
+        ediFile.name,
+        fileContent,
+        JSON.stringify(parsedData),
+        req.session.user.username,
+        ediFile.size
+      ]
+    );
+
+    await logUserActivity(req.session.user.username, req.session.user.type, 'file_upload', clientIP);
+
+    console.log('✅ File uploaded and parsed successfully');
+
+    res.json({
+      success: true,
+      fileId: result.rows[0].id,
+      message: 'Japanese EDI file uploaded and parsed successfully',
+      parsedData: parsedData,
+      stats: {
+        originalSize: ediFile.size,
+        segmentCount: parsedData.totalSegments || 0,
+        dataRows: parsedData.dataRows?.length || 0,
+        hasParsingErrors: !!parsedData.error,
+        detectedFormat: parsedData.fileInfo?.detectedFormat || 'Unknown'
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Upload error:', error);
+    res.status(500).json({ 
+      error: 'File upload failed', 
+      message: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
+app.get('/file/:id', requireAuth, async (req, res) => {
+  try {
+    const fileId = req.params.id;
+    const result = await pool.query('SELECT * FROM edi_files WHERE id = $1', [fileId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).render('error', { 
+        message: 'File not found',
+        user: req.session.user 
+      });
+    }
+
+    const file = result.rows[0];
+    res.render('file-view', {
+      user: req.session.user,
+      file: file,
+      parsedData: file.parsed_data
+    });
+
+  } catch (error) {
+    console.error('File view error:', error);
+    res.render('error', { 
+      message: 'Error loading file',
+      user: req.session.user 
+    });
+  }
+});
+
+app.get('/logs', requireAdmin, async (req, res) => {
+  try {
+    const logs = await pool.query(
+      'SELECT * FROM user_logs ORDER BY timestamp DESC LIMIT 100'
+    );
+    
+    res.render('logs', {
+      user: req.session.user,
+      logs: logs.rows
+    });
+  } catch (error) {
+    console.error('Logs error:', error);
+    res.render('error', { 
+      message: 'Error loading logs',
+      user: req.session.user 
+    });
+  }
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    database: 'neon',
+    features: ['japanese_encoding', 'tab_separated_parsing']
+  });
+});
+
+// Error handling
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).render('error', { 
+    message: 'Something went wrong!',
+    user: req.session.user,
+    error: process.env.NODE_ENV === 'development' ? err : {}
+  });
+});
+
+app.use((req, res) => {
+  res.status(404).render('error', { 
+    message: 'Page not found',
+    user: req.session.user 
+  });
+});
+
+// Start server
+app.listen(PORT, async () => {
+  console.log(`🚀 Japanese EDI Parser Server running on port ${PORT}`);
+  console.log(`🌐 Access your app at: http://localhost:${PORT}`);
+  console.log(`🗄️  Database: Neon PostgreSQL`);
+  console.log(`🇯🇵 Japanese encoding support: Enabled`);
+  console.log(`📊 Supported formats: Tab-separated Japanese EDI files`);
+  await initializeDB();
+});
+
+module.exports = app;

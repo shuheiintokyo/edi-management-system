@@ -1,0 +1,549 @@
+const express = require('express');
+const session = require('express-session');
+const fileUpload = require('express-fileupload');
+const bodyParser = require('body-parser');
+const path = require('path');
+const bcrypt = require('bcryptjs');
+const { Pool } = require('pg');
+require('dotenv').config();
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// PostgreSQL connection (Neon DB)
+const pool = new Pool({
+  connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
+
+// Middleware
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.json());
+app.use(fileUpload({
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max file size
+  useTempFiles: true,
+  tempFileDir: '/tmp/'
+}));
+
+// Session configuration
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'edi-parser-secret-key',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { 
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+  }
+}));
+
+// Initialize database tables
+async function initializeDB() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_logs (
+        id SERIAL PRIMARY KEY,
+        username VARCHAR(20) NOT NULL,
+        user_type VARCHAR(10) NOT NULL,
+        action VARCHAR(50) NOT NULL,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        ip_address INET
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS edi_files (
+        id SERIAL PRIMARY KEY,
+        filename VARCHAR(255) NOT NULL,
+        original_filename VARCHAR(255) NOT NULL,
+        file_content TEXT NOT NULL,
+        parsed_data JSONB,
+        uploaded_by VARCHAR(20) NOT NULL,
+        upload_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        file_size INTEGER
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS edi_changes (
+        id SERIAL PRIMARY KEY,
+        file_id INTEGER REFERENCES edi_files(id),
+        change_type VARCHAR(50) NOT NULL,
+        old_data JSONB,
+        new_data JSONB,
+        changed_by VARCHAR(20) NOT NULL,
+        change_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    console.log('✅ Database tables initialized successfully');
+  } catch (error) {
+    console.error('❌ Error initializing database:', error);
+  }
+}
+
+// Authentication middleware
+function requireAuth(req, res, next) {
+  if (!req.session.user) {
+    return res.redirect('/login');
+  }
+  next();
+}
+
+function requireAdmin(req, res, next) {
+  if (!req.session.user || req.session.user.type !== 'admin') {
+    return res.status(403).render('error', { 
+      message: 'Access denied. Admin privileges required.',
+      user: req.session.user 
+    });
+  }
+  next();
+}
+
+// Logging function
+async function logUserActivity(username, userType, action, ipAddress) {
+  try {
+    await pool.query(
+      'INSERT INTO user_logs (username, user_type, action, ip_address) VALUES ($1, $2, $3, $4)',
+      [username, userType, action, ipAddress]
+    );
+  } catch (error) {
+    console.error('Error logging user activity:', error);
+  }
+}
+
+// Enhanced EDI Parser function
+function parseEDIData(ediContent) {
+  try {
+    console.log('🔍 Starting EDI parsing...');
+    console.log('📄 File content length:', ediContent.length);
+    console.log('📄 First 200 characters:', ediContent.substring(0, 200));
+    
+    if (!ediContent || ediContent.trim().length === 0) {
+      return { 
+        error: 'Empty file content', 
+        message: 'The uploaded file appears to be empty or unreadable',
+        totalSegments: 0,
+        segments: []
+      };
+    }
+
+    // Clean and normalize the content
+    let cleanContent = ediContent
+      .replace(/\r\n/g, '\n')  // Normalize line endings
+      .replace(/\r/g, '\n')    // Handle old Mac line endings
+      .trim();
+
+    console.log('🧹 Cleaned content length:', cleanContent.length);
+
+    // Try different segment separators commonly used in EDI
+    let segments = [];
+    
+    // Method 1: Try tilde (~) separator (most common)
+    if (cleanContent.includes('~')) {
+      segments = cleanContent.split('~').filter(segment => segment.trim().length > 0);
+      console.log('📊 Found segments using ~ separator:', segments.length);
+    }
+    // Method 2: Try line-based splitting
+    else if (cleanContent.includes('\n')) {
+      segments = cleanContent.split('\n').filter(segment => segment.trim().length > 0);
+      console.log('📊 Found segments using line breaks:', segments.length);
+    }
+    // Method 3: Try other common separators
+    else if (cleanContent.includes('|')) {
+      segments = cleanContent.split('|').filter(segment => segment.trim().length > 0);
+      console.log('📊 Found segments using | separator:', segments.length);
+    }
+    // Method 4: Treat as single segment if no separators found
+    else {
+      segments = [cleanContent];
+      console.log('📊 Treating as single segment');
+    }
+
+    const parsed = {
+      totalSegments: segments.length,
+      segments: [],
+      interchangeHeader: null,
+      functionalGroups: [],
+      transactionSets: [],
+      fileInfo: {
+        originalLength: ediContent.length,
+        cleanedLength: cleanContent.length,
+        detectedSeparator: cleanContent.includes('~') ? '~' : 
+                          cleanContent.includes('\n') ? 'newline' :
+                          cleanContent.includes('|') ? '|' : 'none'
+      }
+    };
+
+    // Parse each segment
+    segments.forEach((segment, index) => {
+      const trimmedSegment = segment.trim();
+      if (trimmedSegment.length === 0) return;
+
+      // Try different element separators
+      let elements = [];
+      let elementSeparator = '*';
+      
+      if (trimmedSegment.includes('*')) {
+        elements = trimmedSegment.split('*');
+        elementSeparator = '*';
+      } else if (trimmedSegment.includes('|')) {
+        elements = trimmedSegment.split('|');
+        elementSeparator = '|';
+      } else if (trimmedSegment.includes(':')) {
+        elements = trimmedSegment.split(':');
+        elementSeparator = ':';
+      } else if (trimmedSegment.includes(',')) {
+        elements = trimmedSegment.split(',');
+        elementSeparator = ',';
+      } else {
+        // If no separators found, treat the whole segment as one element
+        elements = [trimmedSegment];
+        elementSeparator = 'none';
+      }
+
+      const segmentType = elements[0] || 'UNK';
+      
+      const segmentData = {
+        index: index + 1,
+        type: segmentType,
+        elements: elements,
+        raw: trimmedSegment,
+        elementSeparator: elementSeparator,
+        elementCount: elements.length
+      };
+
+      parsed.segments.push(segmentData);
+
+      // Identify specific EDI segment types
+      switch (segmentType.toUpperCase()) {
+        case 'ISA':
+          parsed.interchangeHeader = {
+            segmentType: 'ISA',
+            authInfo: elements[1] || '',
+            authInfoQualifier: elements[2] || '',
+            securityInfo: elements[3] || '',
+            securityQualifier: elements[4] || '',
+            senderQualifier: elements[5] || '',
+            senderId: elements[6] || '',
+            receiverQualifier: elements[7] || '',
+            receiverId: elements[8] || '',
+            date: elements[9] || '',
+            time: elements[10] || '',
+            standardsId: elements[11] || '',
+            versionNumber: elements[12] || '',
+            controlNumber: elements[13] || '',
+            acknowledgmentRequest: elements[14] || '',
+            testIndicator: elements[15] || ''
+          };
+          break;
+          
+        case 'GS':
+          parsed.functionalGroups.push({
+            segmentType: 'GS',
+            functionalIdentifierCode: elements[1] || '',
+            applicationSenderCode: elements[2] || '',
+            applicationReceiverCode: elements[3] || '',
+            date: elements[4] || '',
+            time: elements[5] || '',
+            groupControlNumber: elements[6] || '',
+            responsibleAgencyCode: elements[7] || '',
+            versionNumber: elements[8] || ''
+          });
+          break;
+          
+        case 'ST':
+          parsed.transactionSets.push({
+            segmentType: 'ST',
+            transactionSetIdentifier: elements[1] || '',
+            transactionSetControlNumber: elements[2] || ''
+          });
+          break;
+      }
+    });
+
+    // Add summary statistics
+    parsed.statistics = {
+      totalSegments: parsed.segments.length,
+      uniqueSegmentTypes: [...new Set(parsed.segments.map(s => s.type))].length,
+      segmentTypes: parsed.segments.reduce((acc, segment) => {
+        acc[segment.type] = (acc[segment.type] || 0) + 1;
+        return acc;
+      }, {}),
+      hasInterchangeHeader: !!parsed.interchangeHeader,
+      functionalGroupCount: parsed.functionalGroups.length,
+      transactionSetCount: parsed.transactionSets.length
+    };
+
+    console.log('✅ EDI parsing completed successfully');
+    console.log('📊 Statistics:', parsed.statistics);
+
+    return parsed;
+
+  } catch (error) {
+    console.error('❌ Error parsing EDI data:', error);
+    return { 
+      error: 'Failed to parse EDI data', 
+      message: error.message,
+      totalSegments: 0,
+      segments: [],
+      debugInfo: {
+        contentLength: ediContent?.length || 0,
+        contentPreview: ediContent?.substring(0, 100) || 'No content'
+      }
+    };
+  }
+}
+
+// Routes
+app.get('/', (req, res) => {
+  if (req.session.user) {
+    res.redirect('/dashboard');
+  } else {
+    res.redirect('/login');
+  }
+});
+
+app.get('/login', (req, res) => {
+  res.render('login', { error: null });
+});
+
+app.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+  const clientIP = req.ip || req.connection.remoteAddress;
+
+  try {
+    if (username === 'admin') {
+      if (/^\d{4}$/.test(password)) {
+        req.session.user = { username: 'admin', type: 'admin' };
+        await logUserActivity('admin', 'admin', 'login', clientIP);
+        res.redirect('/dashboard');
+      } else {
+        res.render('login', { error: 'Admin password must be 4 digits' });
+      }
+    } else {
+      if (/^[a-zA-Z0-9]{1,20}$/.test(username) && username.length <= 20) {
+        req.session.user = { username: username, type: 'user' };
+        await logUserActivity(username, 'user', 'login', clientIP);
+        res.redirect('/dashboard');
+      } else {
+        res.render('login', { error: 'Username must be 1-20 characters (letters and numbers only)' });
+      }
+    }
+  } catch (error) {
+    console.error('Login error:', error);
+    res.render('login', { error: 'Login failed. Please try again.' });
+  }
+});
+
+app.get('/logout', async (req, res) => {
+  if (req.session.user) {
+    const clientIP = req.ip || req.connection.remoteAddress;
+    await logUserActivity(req.session.user.username, req.session.user.type, 'logout', clientIP);
+    req.session.destroy();
+  }
+  res.redirect('/login');
+});
+
+app.get('/dashboard', requireAuth, async (req, res) => {
+  try {
+    const files = await pool.query(
+      'SELECT id, original_filename, upload_timestamp, uploaded_by, file_size FROM edi_files ORDER BY upload_timestamp DESC LIMIT 10'
+    );
+    
+    res.render('dashboard', { 
+      user: req.session.user,
+      recentFiles: files.rows
+    });
+  } catch (error) {
+    console.error('Dashboard error:', error);
+    res.render('dashboard', { 
+      user: req.session.user,
+      recentFiles: [],
+      error: 'Error loading recent files'
+    });
+  }
+});
+
+app.post('/upload', requireAuth, async (req, res) => {
+  try {
+    console.log('📤 Upload request received');
+    
+    if (!req.files || !req.files.ediFile) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const ediFile = req.files.ediFile;
+    const clientIP = req.ip || req.connection.remoteAddress;
+
+    console.log('📁 File details:', {
+      name: ediFile.name,
+      size: ediFile.size,
+      mimetype: ediFile.mimetype
+    });
+
+    // Validate file extension (allow both .edidat and .edi)
+    const fileName = ediFile.name.toLowerCase();
+    if (!fileName.endsWith('.edidat') && !fileName.endsWith('.edi')) {
+      return res.status(400).json({ 
+        error: 'Invalid file type. Please upload .EDIdat or .edi files only' 
+      });
+    }
+
+    // Validate file size
+    if (ediFile.size > 50 * 1024 * 1024) {
+      return res.status(400).json({ 
+        error: 'File too large. Maximum size is 50MB' 
+      });
+    }
+
+    // Read file content with proper encoding handling
+    let fileContent;
+    try {
+      // Try UTF-8 first
+      fileContent = ediFile.data.toString('utf8');
+      
+      // If the content looks like it might be binary or has encoding issues, try latin1
+      if (fileContent.includes('�') || fileContent.length === 0) {
+        console.log('⚠️ UTF-8 decoding issues detected, trying latin1...');
+        fileContent = ediFile.data.toString('latin1');
+      }
+      
+      console.log('📄 File content length:', fileContent.length);
+      console.log('📄 First 100 chars:', fileContent.substring(0, 100));
+      
+    } catch (encodingError) {
+      console.error('❌ File encoding error:', encodingError);
+      return res.status(400).json({ 
+        error: 'Unable to read file content. Please check file encoding.' 
+      });
+    }
+    
+    // Parse EDI data with enhanced parser
+    const parsedData = parseEDIData(fileContent);
+
+    // Save to database
+    const result = await pool.query(
+      `INSERT INTO edi_files (filename, original_filename, file_content, parsed_data, uploaded_by, file_size) 
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [
+        ediFile.name.replace(/[^a-zA-Z0-9.-]/g, '_'),
+        ediFile.name,
+        fileContent,
+        JSON.stringify(parsedData),
+        req.session.user.username,
+        ediFile.size
+      ]
+    );
+
+    await logUserActivity(req.session.user.username, req.session.user.type, 'file_upload', clientIP);
+
+    console.log('✅ File uploaded and parsed successfully');
+
+    res.json({
+      success: true,
+      fileId: result.rows[0].id,
+      message: 'File uploaded and parsed successfully',
+      parsedData: parsedData,
+      stats: {
+        originalSize: ediFile.size,
+        segmentCount: parsedData.totalSegments || 0,
+        hasParsingErrors: !!parsedData.error
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Upload error:', error);
+    res.status(500).json({ 
+      error: 'File upload failed', 
+      message: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
+app.get('/file/:id', requireAuth, async (req, res) => {
+  try {
+    const fileId = req.params.id;
+    const result = await pool.query('SELECT * FROM edi_files WHERE id = $1', [fileId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).render('error', { 
+        message: 'File not found',
+        user: req.session.user 
+      });
+    }
+
+    const file = result.rows[0];
+    res.render('file-view', {
+      user: req.session.user,
+      file: file,
+      parsedData: file.parsed_data
+    });
+
+  } catch (error) {
+    console.error('File view error:', error);
+    res.render('error', { 
+      message: 'Error loading file',
+      user: req.session.user 
+    });
+  }
+});
+
+app.get('/logs', requireAdmin, async (req, res) => {
+  try {
+    const logs = await pool.query(
+      'SELECT * FROM user_logs ORDER BY timestamp DESC LIMIT 100'
+    );
+    
+    res.render('logs', {
+      user: req.session.user,
+      logs: logs.rows
+    });
+  } catch (error) {
+    console.error('Logs error:', error);
+    res.render('error', { 
+      message: 'Error loading logs',
+      user: req.session.user 
+    });
+  }
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    database: 'neon'
+  });
+});
+
+// Error handling
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).render('error', { 
+    message: 'Something went wrong!',
+    user: req.session.user,
+    error: process.env.NODE_ENV === 'development' ? err : {}
+  });
+});
+
+app.use((req, res) => {
+  res.status(404).render('error', { 
+    message: 'Page not found',
+    user: req.session.user 
+  });
+});
+
+// Start server
+app.listen(PORT, async () => {
+  console.log(`🚀 EDI Parser Server running on port ${PORT}`);
+  console.log(`🌐 Access your app at: http://localhost:${PORT}`);
+  console.log(`🗄️  Database: Neon PostgreSQL`);
+  await initializeDB();
+});
+
+module.exports = app;
