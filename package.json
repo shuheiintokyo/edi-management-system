@@ -2,15 +2,12 @@
   "name": "order-management-system",
   "version": "1.0.0",
   "description": "Simple Order Management Dashboard with Japanese EDI Support",
-  "main": "server.js",
+  "main": "index.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
     "build": "echo 'No build step required'",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "vercel-build": "echo 'Vercel build complete'",
-    "db:inspect": "node database-inspector.js",
-    "db:clear": "node -e \"const {Pool}=require('pg');require('dotenv').config();const pool=new Pool({connectionString:process.env.POSTGRES_URL,ssl:{rejectUnauthorized:false}});pool.query('DELETE FROM edi_orders; DELETE FROM user_logs;').then(()=>{console.log('✅ Database cleared');pool.end()})\""
+    "vercel-build": "echo 'Vercel build complete'"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -28,17 +25,5 @@
   },
   "engines": {
     "node": ">=18.0.0"
-  },
-  "keywords": [
-    "order-management", 
-    "edi", 
-    "japanese", 
-    "shift-jis",
-    "dashboard", 
-    "postgresql",
-    "express",
-    "vercel"
-  ],
-  "author": "Order Management Team",
-  "license": "MIT"
+  }
 }
