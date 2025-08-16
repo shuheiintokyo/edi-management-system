@@ -64,8 +64,6 @@ try {
 }
 
 // Middleware setup
-app.set('view engine', 'ejs');
-app.set('views', path.join(__dirname, 'views'));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
@@ -179,15 +177,624 @@ app.use(async (req, res, next) => {
       }
       
       // For other routes, show a user-friendly error
-      return res.status(500).render('error', { 
-        message: 'Database connection failed. Please check configuration.',
-        user: null,
-        error: process.env.NODE_ENV === 'development' ? error : null
-      });
+      return res.status(500).send(errorHTML('Database connection failed. Please check configuration.'));
     }
   }
   next();
 });
+
+// INLINE HTML TEMPLATES
+const loginHTML = (error = null) => `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Order Management</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body {
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+        }
+        .login-container {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
+            padding: 40px;
+            max-width: 450px;
+            width: 100%;
+        }
+        .icon-wrapper {
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+            color: white;
+            width: 70px;
+            height: 70px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 20px;
+            font-size: 24px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="row justify-content-center">
+            <div class="col-12">
+                <div class="login-container mx-auto">
+                    <div class="text-center">
+                        <div class="icon-wrapper">
+                            <i class="fas fa-shopping-cart"></i>
+                        </div>
+                        <h1>Order Management</h1>
+                        <p class="text-muted">Login to access the order dashboard</p>
+                    </div>
+
+                    ${error ? `<div class="alert alert-danger"><i class="fas fa-exclamation-triangle me-2"></i>${error}</div>` : ''}
+
+                    <form method="POST" action="/login">
+                        <div class="form-floating mb-3">
+                            <input type="text" class="form-control" id="username" name="username" 
+                                   placeholder="Username" required maxlength="20">
+                            <label for="username">Username</label>
+                        </div>
+                        
+                        <div class="form-floating mb-3">
+                            <input type="password" class="form-control" id="password" name="password" 
+                                   placeholder="Password" required>
+                            <label for="password">Password</label>
+                        </div>
+
+                        <button type="submit" class="btn btn-success w-100">
+                            <i class="fas fa-sign-in-alt me-2"></i>Login
+                        </button>
+                    </form>
+
+                    <div class="mt-4 p-3 bg-light rounded">
+                        <h6><i class="fas fa-info-circle me-2"></i>Login Information</h6>
+                        <small><strong>Admin:</strong> Username: <code>admin</code> | Password: Any 4-digit number (e.g. 1234)</small><br>
+                        <small><strong>User:</strong> Any username (letters/numbers, max 20 chars) | Any password</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+`;
+
+const dashboardHTML = (user, orders = [], orderStats = {}, currentPage = 1, totalPages = 1, total = 0, selectedColumns = []) => `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Order Dashboard - Focused View</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .order-stats {
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+            color: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 30px;
+        }
+        .upload-area {
+            border: 2px dashed #007bff;
+            border-radius: 10px;
+            padding: 30px;
+            text-align: center;
+            background-color: #f8f9fa;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-bottom: 30px;
+        }
+        .upload-area:hover {
+            background-color: #e9ecef;
+            border-color: #0056b3;
+        }
+        .order-id {
+            background-color: #28a745;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-weight: bold;
+            font-family: monospace;
+        }
+        .focused-columns-info {
+            background: linear-gradient(135deg, #6f42c1 0%, #e83e8c 100%);
+            color: white;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/dashboard">
+                <i class="fas fa-shopping-cart me-2"></i>Focused Order Management
+            </a>
+            
+            <div class="navbar-nav ms-auto">
+                <div class="nav-item dropdown">
+                    <a class="nav-link dropdown-toggle text-white" href="#" id="navbarDropdown" role="button" data-bs-toggle="dropdown">
+                        <i class="fas fa-user me-1"></i>
+                        ${user.username} 
+                        <span class="badge bg-secondary ms-1">${user.type}</span>
+                    </a>
+                    <ul class="dropdown-menu">
+                        <li><a class="dropdown-item" href="/dashboard">
+                            <i class="fas fa-tachometer-alt me-2"></i>Dashboard
+                        </a></li>
+                        ${user.type === 'admin' ? `
+                        <li><a class="dropdown-item" href="/logs">
+                            <i class="fas fa-list me-2"></i>Activity Logs
+                        </a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        ` : ''}
+                        <li><a class="dropdown-item" href="/logout">
+                            <i class="fas fa-sign-out-alt me-2"></i>Logout
+                        </a></li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container-fluid mt-4">
+        <!-- Page Header -->
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h2>
+                <i class="fas fa-filter me-2 text-primary"></i>
+                Focused Order Dashboard
+            </h2>
+            <div>
+                <span class="text-muted">Welcome back, <strong>${user.username}</strong></span>
+                <button class="btn btn-outline-primary btn-sm ms-2" onclick="location.reload()">
+                    <i class="fas fa-sync-alt me-1"></i>Refresh
+                </button>
+            </div>
+        </div>
+
+        <!-- Order Statistics -->
+        <div class="order-stats">
+            <h5 class="mb-3">
+                <i class="fas fa-chart-line me-2"></i>Order Overview
+            </h5>
+            <div class="row">
+                <div class="col-md-3">
+                    <h3 class="mb-1">${orderStats.total_orders || 0}</h3>
+                    <small>Total Orders</small>
+                </div>
+                <div class="col-md-3">
+                    <h3 class="mb-1">${orderStats.orders_today || 0}</h3>
+                    <small>New Today</small>
+                </div>
+                <div class="col-md-3">
+                    <h3 class="mb-1">${orderStats.updated_today || 0}</h3>
+                    <small>Updated Today</small>
+                </div>
+                <div class="col-md-3">
+                    <h3 class="mb-1">${orders.length}</h3>
+                    <small>Showing Recent</small>
+                </div>
+            </div>
+        </div>
+
+        <!-- Focused Columns Information -->
+        <div class="focused-columns-info">
+            <h6 class="mb-2">
+                <i class="fas fa-filter me-2"></i>Focused Data Extraction - 5 Key Columns
+            </h6>
+            <div class="row">
+                ${selectedColumns.map((col, index) => `
+                <div class="col-md-${index < 3 ? '4' : '6'}">
+                    <small><strong>[${col.index}]</strong> ${col.label} (${col.description})</small>
+                </div>
+                `).join('')}
+            </div>
+        </div>
+
+        <!-- Quick Upload -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="upload-area" id="uploadArea">
+                    <i class="fas fa-cloud-upload-alt fa-2x text-primary mb-2"></i>
+                    <h6>Upload EDI File for Focused Order Processing</h6>
+                    <p class="text-muted mb-2">Extracts only the 5 key columns automatically</p>
+                    <button type="button" class="btn btn-primary btn-sm">
+                        <i class="fas fa-file-upload me-1"></i>Choose File
+                    </button>
+                    <br><small class="text-muted">Supports Japanese encoding | Max 50MB</small>
+                </div>
+                <input type="file" id="fileInput" accept=".edidat,.edi,.txt" style="display: none;">
+                
+                <!-- Upload Progress -->
+                <div id="uploadProgress" style="display: none;" class="mt-3">
+                    <div class="progress mb-2">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                             role="progressbar" style="width: 0%"></div>
+                    </div>
+                    <small class="text-muted">Processing focused order data...</small>
+                </div>
+            </div>
+        </div>
+
+        <!-- Focused Orders Table -->
+        <div class="row">
+            <div class="col-12">
+                <div class="card border-0 shadow-sm">
+                    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">
+                            <i class="fas fa-table me-2"></i>
+                            Focused Order Data
+                            <span class="badge bg-primary">${total} total</span>
+                        </h5>
+                        <div>
+                            ${totalPages > 1 ? `<small class="text-muted me-3">Page ${currentPage} of ${totalPages}</small>` : ''}
+                            <button class="btn btn-sm btn-outline-secondary" onclick="exportFocusedOrders()">
+                                <i class="fas fa-download me-1"></i>Export CSV
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        ${orders && orders.length > 0 ? `
+                        <div class="table-responsive">
+                            <table class="table table-hover mb-0" id="focusedOrderTable">
+                                <thead>
+                                    <tr>
+                                        <th>Order ID<br><span style="font-size: 11px; color: #6c757d;">注文ID</span></th>
+                                        <th>Order Number<br><span style="font-size: 11px; color: #6c757d;">注文番号</span></th>
+                                        <th>Product Code<br><span style="font-size: 11px; color: #6c757d;">発注者品名コード</span></th>
+                                        <th>Product Name<br><span style="font-size: 11px; color: #6c757d;">品名（品名仕様）</span></th>
+                                        <th>Quantity<br><span style="font-size: 11px; color: #6c757d;">注文数量</span></th>
+                                        <th>Delivery Date<br><span style="font-size: 11px; color: #6c757d;">納期</span></th>
+                                        <th>Created By<br><span style="font-size: 11px; color: #6c757d;">作成者</span></th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${orders.map(order => `
+                                    <tr>
+                                        <td><span class="order-id">${order.order_id}</span></td>
+                                        <td>${order.order_number || '-'}</td>
+                                        <td>${order.product_code ? `<span style="background: #f8f9fa; padding: 2px 4px; border-radius: 3px; font-family: monospace; font-size: 12px;">${order.product_code}</span>` : '-'}</td>
+                                        <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${order.product_name || ''}">${order.product_name || '-'}</td>
+                                        <td style="text-align: right; font-weight: bold; color: #007bff;">${order.quantity || '-'}</td>
+                                        <td style="font-family: monospace; color: #6c757d;">${order.delivery_date || '-'}</td>
+                                        <td>
+                                            <span class="badge bg-light text-dark">${order.created_by}</span>
+                                            ${order.updated_by ? `<br><small style="color: #ffc107;">↻ ${order.updated_by}</small>` : ''}
+                                        </td>
+                                        <td>
+                                            <button class="btn btn-sm btn-outline-primary" onclick="viewFocusedOrderDetails('${order.order_id}')">
+                                                <i class="fas fa-eye"></i>
+                                            </button>
+                                        </td>
+                                    </tr>
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+
+                        ${totalPages > 1 ? `
+                        <div class="card-footer bg-white">
+                            <nav aria-label="Order pagination">
+                                <ul class="pagination pagination-sm justify-content-center mb-0">
+                                    ${currentPage > 1 ? `<li class="page-item"><a class="page-link" href="/dashboard?page=${currentPage - 1}">Previous</a></li>` : ''}
+                                    
+                                    ${Array.from({length: Math.min(5, totalPages)}, (_, i) => {
+                                        const page = Math.max(1, currentPage - 2) + i;
+                                        if (page <= totalPages) {
+                                            return `<li class="page-item ${page === currentPage ? 'active' : ''}">
+                                                <a class="page-link" href="/dashboard?page=${page}">${page}</a>
+                                            </li>`;
+                                        }
+                                        return '';
+                                    }).join('')}
+                                    
+                                    ${currentPage < totalPages ? `<li class="page-item"><a class="page-link" href="/dashboard?page=${currentPage + 1}">Next</a></li>` : ''}
+                                </ul>
+                            </nav>
+                        </div>
+                        ` : ''}
+                        ` : `
+                        <div class="text-center py-5">
+                            <i class="fas fa-filter fa-3x text-muted mb-3"></i>
+                            <h6 class="text-muted">No Focused Orders Found</h6>
+                            <p class="text-muted mb-3">Upload an EDI file to start processing focused order data</p>
+                            <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
+                                <i class="fas fa-upload me-2"></i>Upload First File
+                            </button>
+                        </div>
+                        `}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // File upload functionality
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const uploadProgress = document.getElementById('uploadProgress');
+        const progressBar = document.querySelector('.progress-bar');
+
+        // Click to upload
+        uploadArea.addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        // File input change
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFileUpload(e.target.files[0]);
+            }
+        });
+
+        function handleFileUpload(file) {
+            // Validate file type
+            if (!file.name.toLowerCase().match(/\\.(edidat|edi|txt)$/)) {
+                alert('Please upload a .EDIdat, .edi, or .txt file only');
+                return;
+            }
+
+            // Show progress
+            uploadProgress.style.display = 'block';
+            progressBar.style.width = '0%';
+
+            // Create FormData
+            const formData = new FormData();
+            formData.append('ediFile', file);
+
+            // Upload file
+            const xhr = new XMLHttpRequest();
+
+            xhr.upload.addEventListener('progress', (e) => {
+                if (e.lengthComputable) {
+                    const percentComplete = (e.loaded / e.total) * 100;
+                    progressBar.style.width = percentComplete + '%';
+                }
+            });
+
+            xhr.addEventListener('load', () => {
+                uploadProgress.style.display = 'none';
+                
+                if (xhr.status === 200) {
+                    const response = JSON.parse(xhr.responseText);
+                    if (response.success) {
+                        alert('✅ Focused upload successful!\\n\\nEncoding: ' + response.encodingDescription + '\\n\\n📊 Results:\\n• ' + response.stats.newOrders + ' new orders\\n• ' + response.stats.updatedOrders + ' updated orders\\n• ' + response.stats.unchangedOrders + ' unchanged orders\\n\\n🎯 Extracted 5 focused columns from each order');
+                        location.reload(); // Refresh to show new orders
+                    } else {
+                        alert('Upload failed: ' + response.message);
+                    }
+                } else {
+                    const error = JSON.parse(xhr.responseText);
+                    alert('Upload failed: ' + error.error);
+                }
+            });
+
+            xhr.addEventListener('error', () => {
+                uploadProgress.style.display = 'none';
+                alert('Upload failed due to network error');
+            });
+
+            xhr.open('POST', '/upload');
+            xhr.send(formData);
+        }
+
+        // View focused order details
+        function viewFocusedOrderDetails(orderId) {
+            fetch('/api/order/' + orderId)
+                .then(response => response.json())
+                .then(data => {
+                    const details = 'Order Details:\\n\\n' +
+                        'Order ID: ' + data.order_id + '\\n' +
+                        'Order Number: ' + (data.order_number || 'N/A') + '\\n' +
+                        'Product Code: ' + (data.product_code || 'N/A') + '\\n' +
+                        'Product Name: ' + (data.product_name || 'N/A') + '\\n' +
+                        'Quantity: ' + (data.quantity || 'N/A') + '\\n' +
+                        'Delivery Date: ' + (data.delivery_date || 'N/A') + '\\n' +
+                        'Created By: ' + data.created_by + '\\n' +
+                        'Created: ' + new Date(data.created_at).toLocaleString() + '\\n' +
+                        'Encoding: ' + (data.encoding_used || 'Unknown');
+                    alert(details);
+                })
+                .catch(error => {
+                    alert('Failed to load order details: ' + error.message);
+                });
+        }
+
+        // Export focused orders
+        function exportFocusedOrders() {
+            const table = document.getElementById('focusedOrderTable');
+            if (!table) return;
+            
+            let csv = 'Order ID,Order Number,Product Code,Product Name,Quantity,Delivery Date,Created By\\n';
+            
+            const rows = table.querySelectorAll('tbody tr');
+            rows.forEach(row => {
+                const cells = row.querySelectorAll('td');
+                const rowData = [
+                    cells[0].textContent.trim(),
+                    cells[1].textContent.trim(),
+                    cells[2].textContent.trim(),
+                    cells[3].textContent.trim().replace(/"/g, '""'),
+                    cells[4].textContent.trim(),
+                    cells[5].textContent.trim(),
+                    cells[6].textContent.trim().split('\\n')[0] // Only main creator, not updater
+                ];
+                csv += rowData.map(field => '"' + field + '"').join(',') + '\\n';
+            });
+            
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'focused_orders_' + new Date().toISOString().split('T')[0] + '.csv';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+        }
+    </script>
+</body>
+</html>
+`;
+
+const logsHTML = (user, logs = []) => `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Activity Logs - Order Management</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/dashboard">
+                <i class="fas fa-shopping-cart me-2"></i>Order Management
+            </a>
+            <div class="navbar-nav ms-auto">
+                <div class="dropdown">
+                    <a class="nav-link dropdown-toggle text-white" href="#" role="button" data-bs-toggle="dropdown">
+                        <i class="fas fa-user me-1"></i>${user.username} 
+                        <span class="badge bg-secondary">${user.type}</span>
+                    </a>
+                    <ul class="dropdown-menu">
+                        <li><a class="dropdown-item" href="/dashboard">Dashboard</a></li>
+                        <li><a class="dropdown-item" href="/logs">Activity Logs</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a class="dropdown-item" href="/logout">Logout</a></li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container-fluid mt-4">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h2><i class="fas fa-list me-2 text-primary"></i>Activity Logs</h2>
+            <button class="btn btn-outline-primary btn-sm" onclick="location.reload()">
+                <i class="fas fa-sync-alt me-1"></i>Refresh
+            </button>
+        </div>
+        
+        <div class="card border-0 shadow-sm">
+            <div class="card-header bg-white">
+                <h5 class="mb-0">
+                    <i class="fas fa-clock me-2"></i>Recent Activity
+                    <span class="badge bg-primary">${logs.length} records</span>
+                </h5>
+            </div>
+            <div class="card-body p-0">
+                ${logs && logs.length > 0 ? `
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead>
+                            <tr>
+                                <th>User</th>
+                                <th>Type</th>
+                                <th>Action</th>
+                                <th>Timestamp</th>
+                                <th>IP Address</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${logs.map(log => `
+                            <tr>
+                                <td><strong>${log.username}</strong></td>
+                                <td>
+                                    <span class="badge bg-${log.user_type === 'admin' ? 'danger' : 'primary'}">
+                                        ${log.user_type}
+                                    </span>
+                                </td>
+                                <td>
+                                    ${log.action === 'login' ? '<i class="fas fa-sign-in-alt text-success me-1"></i>' :
+                                      log.action === 'logout' ? '<i class="fas fa-sign-out-alt text-warning me-1"></i>' :
+                                      log.action.includes('file_upload') ? '<i class="fas fa-upload text-info me-1"></i>' :
+                                      '<i class="fas fa-circle text-secondary me-1"></i>'}
+                                    ${log.action.replace('_', ' ').toUpperCase()}
+                                </td>
+                                <td>
+                                    <small class="text-muted">
+                                        ${new Date(log.timestamp).toLocaleDateString()}<br>
+                                        ${new Date(log.timestamp).toLocaleTimeString()}
+                                    </small>
+                                </td>
+                                <td>
+                                    <code class="text-muted">${log.ip_address || 'N/A'}</code>
+                                </td>
+                            </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+                ` : `
+                <div class="text-center py-5">
+                    <i class="fas fa-list fa-3x text-muted mb-3"></i>
+                    <h6 class="text-muted">No Activity Logs</h6>
+                    <p class="text-muted">User activity will appear here</p>
+                </div>
+                `}
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+`;
+
+const errorHTML = (message, user = null) => `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error - Order Management</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body class="bg-light d-flex align-items-center" style="min-height: 100vh;">
+    <div class="container">
+        <div class="row justify-content-center">
+            <div class="col-md-6">
+                <div class="card shadow">
+                    <div class="card-body text-center p-5">
+                        <i class="fas fa-exclamation-triangle fa-3x text-warning mb-3"></i>
+                        <h3>Oops! Something went wrong</h3>
+                        <p class="text-muted mb-4">${message}</p>
+                        ${user ? 
+                        `<a href="/dashboard" class="btn btn-primary me-2"><i class="fas fa-home me-2"></i>Dashboard</a>` : 
+                        `<a href="/login" class="btn btn-primary me-2"><i class="fas fa-sign-in-alt me-2"></i>Login</a>`
+                        }
+                        <button onclick="history.back()" class="btn btn-outline-secondary">
+                            <i class="fas fa-arrow-left me-2"></i>Go Back
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+`;
 
 // Authentication middleware
 function requireAuth(req, res, next) {
@@ -197,10 +804,7 @@ function requireAuth(req, res, next) {
 
 function requireAdmin(req, res, next) {
   if (!req.session.user || req.session.user.type !== 'admin') {
-    return res.status(403).render('error', { 
-      message: 'Access denied. Admin privileges required.',
-      user: req.session.user 
-    });
+    return res.status(403).send(errorHTML('Access denied. Admin privileges required.', req.session.user));
   }
   next();
 }
@@ -415,7 +1019,7 @@ async function processOrders(orders, uploadedBy, fileName = '', encoding = '') {
 
 // ROUTES
 
-// Debug route for troubleshooting (add before other routes)
+// Debug route for troubleshooting
 app.get('/debug', (req, res) => {
   const debugInfo = {
     timestamp: new Date().toISOString(),
@@ -426,19 +1030,6 @@ app.get('/debug', (req, res) => {
       hasSessionSecret: !!process.env.SESSION_SECRET,
       postgresUrlLength: process.env.POSTGRES_URL ? process.env.POSTGRES_URL.length : 0,
       sessionSecretLength: process.env.SESSION_SECRET ? process.env.SESSION_SECRET.length : 0
-    },
-    directories: {
-      __dirname: __dirname,
-      viewsPath: path.join(__dirname, 'views'),
-      publicPath: path.join(__dirname, 'public'),
-      nodeModulesExists: fs.existsSync(path.join(__dirname, 'node_modules'))
-    },
-    files: {
-      serverJs: 'loaded successfully',
-      loginEjs: fs.existsSync(path.join(__dirname, 'views', 'login.ejs')),
-      dashboardEjs: fs.existsSync(path.join(__dirname, 'views', 'dashboard.ejs')),
-      errorEjs: fs.existsSync(path.join(__dirname, 'views', 'error.ejs')),
-      packageJson: fs.existsSync(path.join(__dirname, 'package.json'))
     },
     database: {
       initialized: dbInitialized,
@@ -457,7 +1048,7 @@ app.get('/debug', (req, res) => {
   res.json(debugInfo);
 });
 
-// Simple test route that doesn't require database
+// Simple test route
 app.get('/test', (req, res) => {
   res.json({ 
     status: 'Server is running',
@@ -467,36 +1058,17 @@ app.get('/test', (req, res) => {
   });
 });
 
-// Root route with enhanced error handling
+// Main routes
 app.get('/', (req, res) => {
-  try {
-    if (req.session && req.session.user) {
-      res.redirect('/dashboard');
-    } else {
-      res.redirect('/login');
-    }
-  } catch (error) {
-    console.error('Root route error:', error);
-    // Fallback if session middleware fails
-    try {
-      res.render('login', { error: 'System starting up, please try again in a moment.' });
-    } catch (renderError) {
-      console.error('Render error:', renderError);
-      res.status(500).json({ 
-        error: 'System initialization error',
-        message: 'Please check server configuration'
-      });
-    }
+  if (req.session && req.session.user) {
+    res.redirect('/dashboard');
+  } else {
+    res.redirect('/login');
   }
 });
 
 app.get('/login', (req, res) => {
-  try {
-    res.render('login', { error: null });
-  } catch (error) {
-    console.error('Login render error:', error);
-    res.status(500).json({ error: 'Template rendering failed', details: error.message });
-  }
+  res.send(loginHTML());
 });
 
 app.post('/login', async (req, res) => {
@@ -510,7 +1082,7 @@ app.post('/login', async (req, res) => {
         await logUserActivity('admin', 'admin', 'login', clientIP);
         res.redirect('/dashboard');
       } else {
-        res.render('login', { error: 'Admin password must be 4 digits' });
+        res.send(loginHTML('Admin password must be 4 digits'));
       }
     } else {
       if (/^[a-zA-Z0-9]{1,20}$/.test(username) && username.length <= 20) {
@@ -518,12 +1090,12 @@ app.post('/login', async (req, res) => {
         await logUserActivity(username, 'user', 'login', clientIP);
         res.redirect('/dashboard');
       } else {
-        res.render('login', { error: 'Username must be 1-20 characters (letters and numbers only)' });
+        res.send(loginHTML('Username must be 1-20 characters (letters and numbers only)'));
       }
     }
   } catch (error) {
     console.error('Login error:', error);
-    res.render('login', { error: 'Login failed. Please try again.' });
+    res.send(loginHTML('Login failed. Please try again.'));
   }
 });
 
@@ -562,27 +1134,18 @@ app.get('/dashboard', requireAuth, async (req, res) => {
       FROM edi_orders
     `);
     
-    res.render('dashboard', { 
-      user: req.session.user,
-      orders: orders.rows,
-      orderStats: orderStats.rows[0] || { total_orders: 0, orders_today: 0, updated_today: 0 },
-      currentPage: page,
-      totalPages: totalPages,
-      total: total,
-      selectedColumns: SELECTED_COLUMNS
-    });
+    res.send(dashboardHTML(
+      req.session.user,
+      orders.rows,
+      orderStats.rows[0] || { total_orders: 0, orders_today: 0, updated_today: 0 },
+      page,
+      totalPages,
+      total,
+      SELECTED_COLUMNS
+    ));
   } catch (error) {
     console.error('Dashboard error:', error);
-    res.render('dashboard', { 
-      user: req.session.user,
-      orders: [],
-      orderStats: { total_orders: 0, orders_today: 0, updated_today: 0 },
-      currentPage: 1,
-      totalPages: 1,
-      total: 0,
-      selectedColumns: SELECTED_COLUMNS,
-      error: 'Error loading orders'
-    });
+    res.send(errorHTML('Error loading dashboard: ' + error.message, req.session.user));
   }
 });
 
@@ -667,16 +1230,10 @@ app.get('/logs', requireAdmin, async (req, res) => {
     const logs = await pool.query(
       'SELECT * FROM user_logs ORDER BY timestamp DESC LIMIT 100'
     );
-    res.render('logs', {
-      user: req.session.user,
-      logs: logs.rows
-    });
+    res.send(logsHTML(req.session.user, logs.rows));
   } catch (error) {
     console.error('Logs error:', error);
-    res.render('error', { 
-      message: 'Error loading logs',
-      user: req.session.user 
-    });
+    res.send(errorHTML('Error loading logs: ' + error.message, req.session.user));
   }
 });
 
@@ -737,47 +1294,18 @@ app.use((err, req, res, next) => {
   
   // Handle specific error types
   if (err.code === 'ECONNREFUSED') {
-    return res.status(500).render('error', { 
-      message: 'Database connection refused. Please check your database configuration.',
-      user: req.session?.user || null
-    });
+    return res.status(500).send(errorHTML('Database connection refused. Please check your database configuration.', req.session?.user || null));
   }
   
   if (err.code === 'ENOTFOUND') {
-    return res.status(500).render('error', { 
-      message: 'Database host not found. Please check your connection string.',
-      user: req.session?.user || null
-    });
+    return res.status(500).send(errorHTML('Database host not found. Please check your connection string.', req.session?.user || null));
   }
   
-  // Try to render error page, fallback to JSON if that fails
-  try {
-    res.status(500).render('error', { 
-      message: 'Something went wrong!',
-      user: req.session?.user || null
-    });
-  } catch (renderError) {
-    console.error('Error page render failed:', renderError);
-    res.status(500).json({
-      error: 'Server error',
-      message: 'Unable to render error page'
-    });
-  }
+  res.status(500).send(errorHTML('Something went wrong!', req.session?.user || null));
 });
 
 app.use((req, res) => {
-  try {
-    res.status(404).render('error', { 
-      message: 'Page not found',
-      user: req.session?.user || null
-    });
-  } catch (renderError) {
-    console.error('404 page render failed:', renderError);
-    res.status(404).json({
-      error: 'Page not found',
-      message: 'The requested page could not be found'
-    });
-  }
+  res.status(404).send(errorHTML('Page not found', req.session?.user || null));
 });
 
 // Export for Vercel (always export)
