@@ -6,7 +6,7 @@ const path = require('path');
 const { Pool } = require('pg');
 const fs = require('fs');
 
-// Environment variables with defaults
+// Load environment variables
 require('dotenv').config();
 
 const app = express();
@@ -21,64 +21,57 @@ const SELECTED_COLUMNS = [
   { index: 27, name: 'delivery_date', label: '納期', description: 'Delivery Date' }
 ];
 
-// Validate required environment variables
-const requiredEnvVars = ['POSTGRES_URL', 'SESSION_SECRET'];
-const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
-
-if (missingEnvVars.length > 0) {
-  console.error('❌ Missing required environment variables:', missingEnvVars);
-  console.error('Please set these in your Vercel dashboard under Environment Variables');
+// Validate environment variables
+if (!process.env.POSTGRES_URL && !process.env.DATABASE_URL) {
+  console.error('❌ Missing POSTGRES_URL or DATABASE_URL environment variable');
 }
 
-// PostgreSQL connection with production settings
+if (!process.env.SESSION_SECRET) {
+  console.error('❌ Missing SESSION_SECRET environment variable');
+}
+
+// PostgreSQL connection with serverless optimization
 const pool = new Pool({
   connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  },
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
 });
 
-// Test database connection on startup
-pool.on('connect', () => {
-  console.log('✅ Database connected successfully');
-});
-
+// Handle pool errors
 pool.on('error', (err) => {
-  console.error('❌ Database connection error:', err);
+  console.error('❌ Database pool error:', err);
 });
 
-// Load iconv-lite conditionally
+// Load iconv-lite for Japanese encoding
 let iconv;
 try {
   iconv = require('iconv-lite');
-  console.log('✅ iconv-lite loaded successfully for Japanese encoding');
+  console.log('✅ iconv-lite loaded for Japanese encoding');
 } catch (err) {
   console.log('⚠️ iconv-lite not available, using basic encoding');
 }
 
-// Middleware
+// Middleware setup
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
 
-// File upload with production settings
+// File upload configuration
 app.use(fileUpload({
   limits: { fileSize: 50 * 1024 * 1024 },
   useTempFiles: true,
   tempFileDir: '/tmp/',
   createParentPath: true,
-  abortOnLimit: true,
-  responseOnLimit: 'File size limit exceeded'
+  abortOnLimit: true
 }));
 
-// Session configuration for production
+// Session configuration
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'fallback-secret-change-in-production',
+  secret: process.env.SESSION_SECRET || 'fallback-secret-change-this',
   resave: false,
   saveUninitialized: false,
   cookie: { 
@@ -88,12 +81,20 @@ app.use(session({
   }
 }));
 
-// Database initialization function
+// Database initialization - happens on first request in serverless
+let dbInitialized = false;
+
 async function initializeDB() {
+  if (dbInitialized) return true;
+  
   try {
-    console.log('🗄️ Initializing database tables...');
+    console.log('🗄️ Initializing database...');
     
-    // Basic user logs table
+    // Test connection
+    await pool.query('SELECT NOW()');
+    console.log('✅ Database connection successful');
+    
+    // Create user_logs table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS user_logs (
         id SERIAL PRIMARY KEY,
@@ -105,7 +106,7 @@ async function initializeDB() {
       )
     `);
     
-    // Enhanced orders table with specific columns
+    // Create edi_orders table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS edi_orders (
         id SERIAL PRIMARY KEY,
@@ -125,11 +126,14 @@ async function initializeDB() {
       )
     `);
 
-    // Indexes for better performance
+    // Create indexes
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_order_id ON edi_orders(order_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_updated_at ON edi_orders(updated_at)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_order_number ON edi_orders(order_number)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_product_code ON edi_orders(product_code)`);
 
-    console.log('✅ Database tables initialized successfully');
+    console.log('✅ Database initialized successfully');
+    dbInitialized = true;
     return true;
   } catch (error) {
     console.error('❌ Database initialization error:', error);
@@ -137,7 +141,15 @@ async function initializeDB() {
   }
 }
 
-// Auth middleware
+// Middleware to ensure DB is initialized
+app.use(async (req, res, next) => {
+  if (!dbInitialized) {
+    await initializeDB();
+  }
+  next();
+});
+
+// Authentication middleware
 function requireAuth(req, res, next) {
   if (!req.session.user) return res.redirect('/login');
   next();
@@ -165,17 +177,20 @@ async function logUserActivity(username, userType, action, ipAddress) {
   }
 }
 
-// Enhanced Japanese encoding detection
+// Japanese encoding detection
 function detectAndDecodeJapanese(rawBytes, fileName = '') {
+  console.log(`🇯🇵 Detecting encoding for file: ${fileName}`);
+  
   if (!iconv) {
+    console.log('⚠️ iconv-lite not available, using UTF-8');
     return { content: rawBytes.toString('utf8'), encoding: 'utf8' };
   }
 
   const encodings = [
-    { name: 'shift_jis', description: 'Shift-JIS (Most common Japanese Windows)' },
-    { name: 'cp932', description: 'CP932 (Windows Japanese Extended)' },
-    { name: 'euc-jp', description: 'EUC-JP (Unix/Linux Japanese)' },
-    { name: 'utf8', description: 'UTF-8 (Universal)' }
+    { name: 'shift_jis', description: 'Shift-JIS' },
+    { name: 'cp932', description: 'CP932' },
+    { name: 'euc-jp', description: 'EUC-JP' },
+    { name: 'utf8', description: 'UTF-8' }
   ];
 
   let bestResult = null;
@@ -205,13 +220,24 @@ function detectAndDecodeJapanese(rawBytes, fileName = '') {
     }
   }
 
-  return bestResult || { content: rawBytes.toString('utf8'), encoding: 'utf8', description: 'UTF-8 (Fallback)' };
+  const result = bestResult || { content: rawBytes.toString('utf8'), encoding: 'utf8', description: 'UTF-8 (Fallback)' };
+  console.log(`✅ Using encoding: ${result.description}`);
+  return result;
 }
 
 // Order parsing function
 function parseOrdersFromContent(content, fileName = '', encoding = 'unknown') {
   try {
+    console.log(`🎯 Parsing orders from ${fileName}`);
+    
+    if (!content || typeof content !== 'string') {
+      console.log('❌ Invalid content');
+      return [];
+    }
+
     const lines = content.split(/\r?\n/).filter(line => line.trim().length > 0);
+    console.log(`📊 Found ${lines.length} lines`);
+    
     const orders = [];
     
     lines.forEach((line, index) => {
@@ -220,8 +246,10 @@ function parseOrdersFromContent(content, fileName = '', encoding = 'unknown') {
       const trimmedLine = line.trim();
       if (trimmedLine.length === 0) return;
       
+      // Split by tab (most common in Japanese EDI)
       let elements = trimmedLine.split('\t').map(e => e.trim());
       
+      // Try other separators if no tabs
       if (elements.length === 1) {
         if (trimmedLine.includes('|')) {
           elements = trimmedLine.split('|').map(e => e.trim());
@@ -230,6 +258,7 @@ function parseOrdersFromContent(content, fileName = '', encoding = 'unknown') {
         }
       }
       
+      // Look for order ID (LK pattern)
       let orderID = null;
       elements.forEach((element) => {
         if (/^LK\d+/.test(element)) {
@@ -253,6 +282,7 @@ function parseOrdersFromContent(content, fileName = '', encoding = 'unknown') {
       }
     });
     
+    console.log(`✅ Extracted ${orders.length} orders`);
     return orders;
   } catch (error) {
     console.error('❌ Order parsing error:', error);
@@ -262,6 +292,8 @@ function parseOrdersFromContent(content, fileName = '', encoding = 'unknown') {
 
 // Process orders function
 async function processOrders(orders, uploadedBy, fileName = '', encoding = '') {
+  console.log(`🔄 Processing ${orders.length} orders`);
+  
   const results = {
     newOrders: [],
     updatedOrders: [],
@@ -276,6 +308,7 @@ async function processOrders(orders, uploadedBy, fileName = '', encoding = '') {
       );
       
       if (existingOrder.rows.length === 0) {
+        // New order
         await pool.query(
           `INSERT INTO edi_orders 
            (order_id, order_number, product_code, product_name, quantity, delivery_date, 
@@ -296,6 +329,7 @@ async function processOrders(orders, uploadedBy, fileName = '', encoding = '') {
         );
         results.newOrders.push(order.orderID);
       } else {
+        // Check for updates
         const existing = existingOrder.rows[0];
         let hasChanges = false;
         
@@ -335,10 +369,12 @@ async function processOrders(orders, uploadedBy, fileName = '', encoding = '') {
     }
   }
   
+  console.log(`📊 Results: ${results.newOrders.length} new, ${results.updatedOrders.length} updated, ${results.unchangedOrders.length} unchanged`);
   return results;
 }
 
-// Routes
+// ROUTES
+
 app.get('/', (req, res) => {
   if (req.session.user) {
     res.redirect('/dashboard');
@@ -388,7 +424,6 @@ app.get('/logout', async (req, res) => {
   res.redirect('/login');
 });
 
-// Dashboard route
 app.get('/dashboard', requireAuth, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
@@ -439,7 +474,6 @@ app.get('/dashboard', requireAuth, async (req, res) => {
   }
 });
 
-// Upload route
 app.post('/upload', requireAuth, async (req, res) => {
   try {
     if (!req.files || !req.files.ediFile) {
@@ -449,6 +483,9 @@ app.post('/upload', requireAuth, async (req, res) => {
     const ediFile = req.files.ediFile;
     const clientIP = req.ip || req.connection.remoteAddress;
 
+    console.log(`📁 Processing file: ${ediFile.name}`);
+
+    // Validate file type
     const fileName = ediFile.name.toLowerCase();
     if (!fileName.endsWith('.edidat') && !fileName.endsWith('.edi') && !fileName.endsWith('.txt')) {
       return res.status(400).json({ 
@@ -456,6 +493,7 @@ app.post('/upload', requireAuth, async (req, res) => {
       });
     }
 
+    // Read file content
     let rawBytes = null;
     if (ediFile.data && ediFile.data.length > 0) {
       rawBytes = ediFile.data;
@@ -465,10 +503,12 @@ app.post('/upload', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'File data not accessible' });
     }
 
+    // Decode file with Japanese support
     const decodingResult = detectAndDecodeJapanese(rawBytes, ediFile.name);
     const fileContent = decodingResult.content;
     const usedEncoding = decodingResult.encoding;
 
+    // Parse and process orders
     const extractedOrders = parseOrdersFromContent(fileContent, ediFile.name, usedEncoding);
     const orderResults = await processOrders(extractedOrders, req.session.user.username, ediFile.name, usedEncoding);
     
@@ -497,7 +537,6 @@ app.post('/upload', requireAuth, async (req, res) => {
   }
 });
 
-// API endpoint for order details
 app.get('/api/order/:id', requireAuth, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM edi_orders WHERE order_id = $1', [req.params.id]);
@@ -511,7 +550,6 @@ app.get('/api/order/:id', requireAuth, async (req, res) => {
   }
 });
 
-// Admin logs route
 app.get('/logs', requireAdmin, async (req, res) => {
   try {
     const logs = await pool.query(
@@ -530,7 +568,6 @@ app.get('/logs', requireAdmin, async (req, res) => {
   }
 });
 
-// Health check
 app.get('/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
@@ -567,24 +604,14 @@ app.use((req, res) => {
   });
 });
 
-// Initialize database and start server
-if (process.env.NODE_ENV !== 'production') {
-  // Local development
+// Export for Vercel
+module.exports = app;
+
+// Local development server
+if (require.main === module) {
   app.listen(PORT, async () => {
     console.log(`🚀 Order Management System running on port ${PORT}`);
+    console.log(`🌐 Access: http://localhost:${PORT}`);
     await initializeDB();
   });
-} else {
-  // Production (Vercel) - initialize DB on first request
-  let dbInitialized = false;
-  
-  app.use(async (req, res, next) => {
-    if (!dbInitialized) {
-      console.log('🗄️ Initializing database for first request...');
-      dbInitialized = await initializeDB();
-    }
-    next();
-  });
 }
-
-module.exports = app;
