@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "name": "web-edi-management",
+  "name": "order-management-system",
   "builds": [
     {
       "src": "server.js",
@@ -18,7 +18,9 @@
   },
   "functions": {
     "server.js": {
-      "maxDuration": 30
+      "maxDuration": 30,
+      "memory": 1024
     }
-  }
+  },
+  "regions": ["iad1"]
 }

@@ -6,14 +6,11 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "build": "npm install",
+    "build": "echo 'No build step required'",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "deploy": "vercel --prod",
-    "logs": "vercel logs",
+    "vercel-build": "echo 'Vercel build complete'",
     "db:inspect": "node database-inspector.js",
-    "db:orders": "node -e \"require('./database-inspector').inspectDatabase().then(() => process.exit())\"",
-    "db:clear": "node -e \"const {Pool}=require('pg');require('dotenv').config();const pool=new Pool({connectionString:process.env.POSTGRES_URL,ssl:process.env.NODE_ENV==='production'?{rejectUnauthorized:false}:false});pool.query('DELETE FROM edi_orders; DELETE FROM user_logs;').then(()=>{console.log('✅ Database cleared');pool.end()})\"",
-    "db:stats": "node -e \"const {Pool}=require('pg');require('dotenv').config();const pool=new Pool({connectionString:process.env.POSTGRES_URL,ssl:process.env.NODE_ENV==='production'?{rejectUnauthorized:false}:false});pool.query('SELECT COUNT(*) as orders FROM edi_orders; SELECT COUNT(*) as logs FROM user_logs;').then(r=>{console.log('📊 Orders:',r.rows[0].orders,'| Logs:',r.rows[0].logs);pool.end()})\""
+    "db:clear": "node -e \"const {Pool}=require('pg');require('dotenv').config();const pool=new Pool({connectionString:process.env.POSTGRES_URL,ssl:{rejectUnauthorized:false}});pool.query('DELETE FROM edi_orders; DELETE FROM user_logs;').then(()=>{console.log('✅ Database cleared');pool.end()})\""
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -39,7 +36,8 @@
     "shift-jis",
     "dashboard", 
     "postgresql",
-    "express"
+    "express",
+    "vercel"
   ],
   "author": "Order Management Team",
   "license": "MIT"

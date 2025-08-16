@@ -5,13 +5,8 @@ const bodyParser = require('body-parser');
 const path = require('path');
 const { Pool } = require('pg');
 const fs = require('fs');
-let iconv;
-try {
-  iconv = require('iconv-lite');
-  console.log('✅ iconv-lite loaded successfully for Japanese encoding');
-} catch (err) {
-  console.log('⚠️ iconv-lite not available, using basic encoding');
-}
+
+// Environment variables with defaults
 require('dotenv').config();
 
 const app = express();
@@ -26,11 +21,43 @@ const SELECTED_COLUMNS = [
   { index: 27, name: 'delivery_date', label: '納期', description: 'Delivery Date' }
 ];
 
-// PostgreSQL connection
+// Validate required environment variables
+const requiredEnvVars = ['POSTGRES_URL', 'SESSION_SECRET'];
+const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
+
+if (missingEnvVars.length > 0) {
+  console.error('❌ Missing required environment variables:', missingEnvVars);
+  console.error('Please set these in your Vercel dashboard under Environment Variables');
+}
+
+// PostgreSQL connection with production settings
 const pool = new Pool({
   connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: {
+    rejectUnauthorized: false
+  },
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
 });
+
+// Test database connection on startup
+pool.on('connect', () => {
+  console.log('✅ Database connected successfully');
+});
+
+pool.on('error', (err) => {
+  console.error('❌ Database connection error:', err);
+});
+
+// Load iconv-lite conditionally
+let iconv;
+try {
+  iconv = require('iconv-lite');
+  console.log('✅ iconv-lite loaded successfully for Japanese encoding');
+} catch (err) {
+  console.log('⚠️ iconv-lite not available, using basic encoding');
+}
 
 // Middleware
 app.set('view engine', 'ejs');
@@ -38,25 +65,34 @@ app.set('views', path.join(__dirname, 'views'));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
+
+// File upload with production settings
 app.use(fileUpload({
   limits: { fileSize: 50 * 1024 * 1024 },
   useTempFiles: true,
-  tempFileDir: '/tmp/'
+  tempFileDir: '/tmp/',
+  createParentPath: true,
+  abortOnLimit: true,
+  responseOnLimit: 'File size limit exceeded'
 }));
 
+// Session configuration for production
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'edi-parser-secret-key',
+  secret: process.env.SESSION_SECRET || 'fallback-secret-change-in-production',
   resave: false,
   saveUninitialized: false,
   cookie: { 
     secure: process.env.NODE_ENV === 'production',
-    maxAge: 24 * 60 * 60 * 1000
+    maxAge: 24 * 60 * 60 * 1000,
+    httpOnly: true
   }
 }));
 
-// Database initialization
+// Database initialization function
 async function initializeDB() {
   try {
+    console.log('🗄️ Initializing database tables...');
+    
     // Basic user logs table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS user_logs (
@@ -92,13 +128,12 @@ async function initializeDB() {
     // Indexes for better performance
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_order_id ON edi_orders(order_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_updated_at ON edi_orders(updated_at)`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_order_number ON edi_orders(order_number)`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_product_code ON edi_orders(product_code)`);
 
-    console.log('✅ Database tables initialized with focused column structure');
-    console.log('🎯 Tracking columns:', SELECTED_COLUMNS.map(col => col.label).join(', '));
+    console.log('✅ Database tables initialized successfully');
+    return true;
   } catch (error) {
     console.error('❌ Database initialization error:', error);
+    return false;
   }
 }
 
@@ -118,27 +153,21 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// Utility functions
 async function logUserActivity(username, userType, action, ipAddress) {
   try {
     await pool.query(
       'INSERT INTO user_logs (username, user_type, action, ip_address) VALUES ($1, $2, $3, $4)',
       [username, userType, action, ipAddress]
     );
-    console.log(`📝 Logged activity: ${username} (${userType}) - ${action} from ${ipAddress}`);
   } catch (error) {
     console.error('Logging error:', error);
   }
 }
 
-// Enhanced Japanese encoding detection with Shift-JIS priority
+// Enhanced Japanese encoding detection
 function detectAndDecodeJapanese(rawBytes, fileName = '') {
-  console.log('🇯🇵 JAPANESE ENCODING DETECTION');
-  console.log('================================');
-  console.log(`📁 File: ${fileName}`);
-  console.log(`📊 Raw bytes length: ${rawBytes.length}`);
-  
   if (!iconv) {
-    console.log('⚠️ iconv-lite not available, using UTF-8');
     return { content: rawBytes.toString('utf8'), encoding: 'utf8' };
   }
 
@@ -146,7 +175,6 @@ function detectAndDecodeJapanese(rawBytes, fileName = '') {
     { name: 'shift_jis', description: 'Shift-JIS (Most common Japanese Windows)' },
     { name: 'cp932', description: 'CP932 (Windows Japanese Extended)' },
     { name: 'euc-jp', description: 'EUC-JP (Unix/Linux Japanese)' },
-    { name: 'iso-2022-jp', description: 'JIS (Email/Legacy Japanese)' },
     { name: 'utf8', description: 'UTF-8 (Universal)' }
   ];
 
@@ -155,8 +183,6 @@ function detectAndDecodeJapanese(rawBytes, fileName = '') {
 
   for (const encoding of encodings) {
     try {
-      console.log(`\n🔍 Testing ${encoding.name} - ${encoding.description}:`);
-      
       let decoded;
       if (encoding.name === 'utf8') {
         decoded = rawBytes.toString('utf8');
@@ -164,108 +190,38 @@ function detectAndDecodeJapanese(rawBytes, fileName = '') {
         decoded = iconv.decode(rawBytes, encoding.name);
       }
       
-      if (!decoded || decoded.length === 0) {
-        console.log(`  ❌ Failed: No content decoded`);
-        continue;
-      }
+      if (!decoded || decoded.length === 0) continue;
 
-      const stats = analyzeDecodedContent(decoded);
-      const score = calculateEncodingScore(stats, encoding.name);
-      
-      console.log(`  📊 Length: ${decoded.length} chars`);
-      console.log(`  📊 Japanese chars: ${stats.japaneseChars}`);
-      console.log(`  📊 Replacement chars: ${stats.replacementChars} (${(stats.replacementRatio * 100).toFixed(1)}%)`);
-      console.log(`  📊 Quality score: ${score.toFixed(2)}`);
+      const replacementChars = (decoded.match(/�/g) || []).length;
+      const replacementRatio = decoded.length > 0 ? replacementChars / decoded.length : 1;
+      const score = 100 - (replacementRatio * 1000);
       
       if (score > bestScore) {
         bestScore = score;
         bestResult = { content: decoded, encoding: encoding.name, description: encoding.description };
-        console.log(`  ✅ New best encoding!`);
       }
-      
     } catch (err) {
-      console.log(`  ❌ Failed: ${err.message}`);
+      continue;
     }
   }
 
-  if (bestResult) {
-    console.log(`\n🎯 FINAL DECISION: ${bestResult.encoding} - ${bestResult.description}`);
-    return bestResult;
-  } else {
-    console.log(`\n⚠️ FALLBACK: Using UTF-8 as last resort`);
-    return { content: rawBytes.toString('utf8'), encoding: 'utf8', description: 'UTF-8 (Fallback)' };
-  }
+  return bestResult || { content: rawBytes.toString('utf8'), encoding: 'utf8', description: 'UTF-8 (Fallback)' };
 }
 
-function analyzeDecodedContent(content) {
-  const japaneseChars = (content.match(/[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF]/g) || []).length;
-  const replacementChars = (content.match(/�/g) || []).length;
-  const asciiChars = (content.match(/[\x00-\x7F]/g) || []).length;
-  const structuralChars = (content.match(/[\t\r\n]/g) || []).length;
-  const totalChars = content.length;
-  
-  return {
-    japaneseChars,
-    replacementChars,
-    replacementRatio: totalChars > 0 ? replacementChars / totalChars : 1,
-    asciiChars,
-    structuralChars,
-    totalChars
-  };
-}
-
-function calculateEncodingScore(stats, encodingName) {
-  let score = 0;
-  
-  // Heavily penalize replacement characters
-  score -= stats.replacementRatio * 1000;
-  
-  // Reward Japanese characters
-  score += stats.japaneseChars * 10;
-  
-  // Reward structural characters (tabs, newlines)
-  score += stats.structuralChars * 5;
-  
-  // Reward ASCII characters
-  score += stats.asciiChars * 0.5;
-  
-  // Bonus for Shift-JIS variants (Windows priority)
-  if (encodingName.includes('shift') || encodingName.includes('sjis') || encodingName === 'cp932') {
-    score += 50;
-  }
-  
-  return score;
-}
-
-// 🎯 FOCUSED ORDER PARSING - Extract only selected columns
+// Order parsing function
 function parseOrdersFromContent(content, fileName = '', encoding = 'unknown') {
   try {
-    console.log('🎯 FOCUSED ORDER PARSING');
-    console.log('========================');
-    console.log(`📁 File: ${fileName}`);
-    console.log(`📊 Encoding used: ${encoding}`);
-    console.log(`🔍 Target columns: ${SELECTED_COLUMNS.map(col => `[${col.index}] ${col.label}`).join(', ')}`);
-    
-    if (!content || typeof content !== 'string') {
-      console.log('❌ Invalid content provided');
-      return [];
-    }
-
     const lines = content.split(/\r?\n/).filter(line => line.trim().length > 0);
-    console.log(`📊 Found ${lines.length} non-empty lines`);
-    
     const orders = [];
     
     lines.forEach((line, index) => {
+      if (index === 0) return; // Skip header
+      
       const trimmedLine = line.trim();
+      if (trimmedLine.length === 0) return;
       
-      // Skip empty lines and header (first line)
-      if (trimmedLine.length === 0 || index === 0) return;
-      
-      // Split by tab (most common in Japanese EDI)
       let elements = trimmedLine.split('\t').map(e => e.trim());
       
-      // If no tabs, try other separators
       if (elements.length === 1) {
         if (trimmedLine.includes('|')) {
           elements = trimmedLine.split('|').map(e => e.trim());
@@ -274,27 +230,19 @@ function parseOrdersFromContent(content, fileName = '', encoding = 'unknown') {
         }
       }
       
-      console.log(`📋 Line ${index + 1}: ${elements.length} total elements`);
-      
-      // Look for order ID (LK pattern)
       let orderID = null;
-      elements.forEach((element, colIndex) => {
+      elements.forEach((element) => {
         if (/^LK\d+/.test(element)) {
           orderID = element;
         }
       });
       
       if (orderID) {
-        // Extract only the selected columns
-        const orderData = {
-          order_id: orderID
-        };
+        const orderData = { order_id: orderID };
         
-        console.log(`🎯 Extracting selected columns for order: ${orderID}`);
         SELECTED_COLUMNS.forEach(col => {
           const value = elements[col.index] || '';
           orderData[col.name] = value;
-          console.log(`  📊 [${col.index}] ${col.label}: "${value}"`);
         });
         
         orders.push({
@@ -302,29 +250,18 @@ function parseOrdersFromContent(content, fileName = '', encoding = 'unknown') {
           data: orderData,
           rawSegment: trimmedLine
         });
-        
-        console.log(`✅ Order ${orderID} processed with ${SELECTED_COLUMNS.length} focused fields`);
-      } else {
-        console.log(`⚪ Line ${index + 1}: No LK order ID found`);
       }
     });
     
-    console.log(`✅ Extracted ${orders.length} orders with focused columns from ${lines.length} lines`);
     return orders;
-    
   } catch (error) {
-    console.error('❌ Focused order parsing error:', error);
+    console.error('❌ Order parsing error:', error);
     return [];
   }
 }
 
+// Process orders function
 async function processOrders(orders, uploadedBy, fileName = '', encoding = '') {
-  console.log('🔄 PROCESSING FOCUSED ORDERS');
-  console.log('============================');
-  console.log(`👤 Uploaded by: ${uploadedBy}`);
-  console.log(`📁 File: ${fileName}`);
-  console.log(`📊 Orders to process: ${orders.length}`);
-  
   const results = {
     newOrders: [],
     updatedOrders: [],
@@ -333,15 +270,12 @@ async function processOrders(orders, uploadedBy, fileName = '', encoding = '') {
   
   for (const order of orders) {
     try {
-      console.log(`🔍 Processing order: ${order.orderID}`);
-      
       const existingOrder = await pool.query(
         'SELECT * FROM edi_orders WHERE order_id = $1',
         [order.orderID]
       );
       
       if (existingOrder.rows.length === 0) {
-        // New order - insert with focused columns
         await pool.query(
           `INSERT INTO edi_orders 
            (order_id, order_number, product_code, product_name, quantity, delivery_date, 
@@ -361,12 +295,7 @@ async function processOrders(orders, uploadedBy, fileName = '', encoding = '') {
           ]
         );
         results.newOrders.push(order.orderID);
-        console.log(`  ✅ Added new order: ${order.orderID}`);
-        console.log(`     📦 Product: ${order.data.product_name || 'N/A'}`);
-        console.log(`     📊 Quantity: ${order.data.quantity || 'N/A'}`);
-        console.log(`     📅 Delivery: ${order.data.delivery_date || 'N/A'}`);
       } else {
-        // Check if data changed (compare focused fields only)
         const existing = existingOrder.rows[0];
         let hasChanges = false;
         
@@ -397,10 +326,8 @@ async function processOrders(orders, uploadedBy, fileName = '', encoding = '') {
             ]
           );
           results.updatedOrders.push(order.orderID);
-          console.log(`  🔄 Updated order: ${order.orderID}`);
         } else {
           results.unchangedOrders.push(order.orderID);
-          console.log(`  ⚪ No changes for order: ${order.orderID}`);
         }
       }
     } catch (error) {
@@ -408,7 +335,6 @@ async function processOrders(orders, uploadedBy, fileName = '', encoding = '') {
     }
   }
   
-  console.log(`📊 Processing complete: ${results.newOrders.length} new, ${results.updatedOrders.length} updated, ${results.unchangedOrders.length} unchanged`);
   return results;
 }
 
@@ -462,14 +388,13 @@ app.get('/logout', async (req, res) => {
   res.redirect('/login');
 });
 
-// Main dashboard route - shows focused order data
+// Dashboard route
 app.get('/dashboard', requireAuth, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = 50;
     const offset = (page - 1) * limit;
     
-    // Get orders with focused columns
     const orders = await pool.query(`
       SELECT order_id, order_number, product_code, product_name, quantity, delivery_date,
              created_by, updated_by, created_at, updated_at, encoding_used, file_name
@@ -478,12 +403,10 @@ app.get('/dashboard', requireAuth, async (req, res) => {
       LIMIT $1 OFFSET $2
     `, [limit, offset]);
     
-    // Get total count for pagination
     const totalCount = await pool.query('SELECT COUNT(*) FROM edi_orders');
     const total = parseInt(totalCount.rows[0].count);
     const totalPages = Math.ceil(total / limit);
     
-    // Get order statistics
     const orderStats = await pool.query(`
       SELECT 
         COUNT(*) as total_orders,
@@ -516,11 +439,8 @@ app.get('/dashboard', requireAuth, async (req, res) => {
   }
 });
 
-// Enhanced upload route with focused column extraction
+// Upload route
 app.post('/upload', requireAuth, async (req, res) => {
-  console.log('📤 UPLOAD REQUEST RECEIVED');
-  console.log('==========================');
-  
   try {
     if (!req.files || !req.files.ediFile) {
       return res.status(400).json({ error: 'No file uploaded' });
@@ -529,11 +449,6 @@ app.post('/upload', requireAuth, async (req, res) => {
     const ediFile = req.files.ediFile;
     const clientIP = req.ip || req.connection.remoteAddress;
 
-    console.log(`📁 File: ${ediFile.name}`);
-    console.log(`📊 Size: ${ediFile.size} bytes`);
-    console.log(`👤 User: ${req.session.user.username}`);
-
-    // Validate file
     const fileName = ediFile.name.toLowerCase();
     if (!fileName.endsWith('.edidat') && !fileName.endsWith('.edi') && !fileName.endsWith('.txt')) {
       return res.status(400).json({ 
@@ -541,7 +456,6 @@ app.post('/upload', requireAuth, async (req, res) => {
       });
     }
 
-    // Read file content
     let rawBytes = null;
     if (ediFile.data && ediFile.data.length > 0) {
       rawBytes = ediFile.data;
@@ -551,20 +465,14 @@ app.post('/upload', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'File data not accessible' });
     }
 
-    // Decode with improved Japanese detection
     const decodingResult = detectAndDecodeJapanese(rawBytes, ediFile.name);
     const fileContent = decodingResult.content;
     const usedEncoding = decodingResult.encoding;
 
-    console.log(`✅ Successfully decoded using: ${usedEncoding} - ${decodingResult.description}`);
-
-    // Extract and process orders with focused columns
     const extractedOrders = parseOrdersFromContent(fileContent, ediFile.name, usedEncoding);
     const orderResults = await processOrders(extractedOrders, req.session.user.username, ediFile.name, usedEncoding);
     
     await logUserActivity(req.session.user.username, req.session.user.type, `file_upload_${usedEncoding}`, clientIP);
-
-    console.log('✅ Upload processing complete');
 
     res.json({
       success: true,
@@ -622,40 +530,61 @@ app.get('/logs', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
-    timestamp: new Date().toISOString(),
-    features: ['focused_columns', 'japanese_encoding', 'order_management'],
-    selectedColumns: SELECTED_COLUMNS
-  });
+// Health check
+app.get('/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({ 
+      status: 'healthy', 
+      timestamp: new Date().toISOString(),
+      database: 'connected',
+      features: ['focused_columns', 'japanese_encoding', 'order_management'],
+      selectedColumns: SELECTED_COLUMNS
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      status: 'unhealthy', 
+      timestamp: new Date().toISOString(),
+      database: 'disconnected',
+      error: error.message
+    });
+  }
 });
 
+// Error handlers
 app.use((err, req, res, next) => {
-  console.error('❌ Error:', err.stack);
+  console.error('❌ Error:', err);
   res.status(500).render('error', { 
     message: 'Something went wrong!',
-    user: req.session.user
+    user: req.session.user || null
   });
 });
 
 app.use((req, res) => {
   res.status(404).render('error', { 
     message: 'Page not found',
-    user: req.session.user 
+    user: req.session.user || null
   });
 });
 
-app.listen(PORT, async () => {
-  console.log(`🚀 Focused Order Management System running on port ${PORT}`);
-  console.log(`🌐 Access: http://localhost:${PORT}`);
-  console.log(`🗄️  Database: Neon PostgreSQL`);
-  console.log(`🇯🇵 Priority encoding: Shift-JIS (Japanese Windows)`);
-  console.log(`🎯 Focused columns: ${SELECTED_COLUMNS.length} selected fields`);
-  SELECTED_COLUMNS.forEach(col => {
-    console.log(`   📊 [${col.index}] ${col.label} (${col.description})`);
+// Initialize database and start server
+if (process.env.NODE_ENV !== 'production') {
+  // Local development
+  app.listen(PORT, async () => {
+    console.log(`🚀 Order Management System running on port ${PORT}`);
+    await initializeDB();
   });
-  await initializeDB();
-});
+} else {
+  // Production (Vercel) - initialize DB on first request
+  let dbInitialized = false;
+  
+  app.use(async (req, res, next) => {
+    if (!dbInitialized) {
+      console.log('🗄️ Initializing database for first request...');
+      dbInitialized = await initializeDB();
+    }
+    next();
+  });
+}
 
 module.exports = app;
