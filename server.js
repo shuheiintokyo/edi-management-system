@@ -17,6 +17,15 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// 🎯 SELECTED COLUMNS CONFIGURATION
+const SELECTED_COLUMNS = [
+  { index: 6, name: 'order_number', label: '注文番号', description: 'Order Number' },
+  { index: 22, name: 'product_code', label: '発注者品名コード', description: 'Orderer Product Code' },
+  { index: 20, name: 'product_name', label: '品名（品名仕様）', description: 'Product Name/Specification' },
+  { index: 14, name: 'quantity', label: '注文数量（受注数量）', description: 'Order Quantity' },
+  { index: 27, name: 'delivery_date', label: '納期', description: 'Delivery Date' }
+];
+
 // PostgreSQL connection
 const pool = new Pool({
   connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL,
@@ -45,7 +54,7 @@ app.use(session({
   }
 }));
 
-// Database initialization - simplified for orders only
+// Database initialization
 async function initializeDB() {
   try {
     // Basic user logs table
@@ -60,12 +69,16 @@ async function initializeDB() {
       )
     `);
     
-    // Orders table - main focus
+    // Enhanced orders table with specific columns
     await pool.query(`
       CREATE TABLE IF NOT EXISTS edi_orders (
         id SERIAL PRIMARY KEY,
         order_id VARCHAR(50) UNIQUE NOT NULL,
-        order_data JSONB NOT NULL,
+        order_number VARCHAR(100),
+        product_code VARCHAR(100),
+        product_name TEXT,
+        quantity VARCHAR(50),
+        delivery_date VARCHAR(50),
         raw_segment TEXT,
         created_by VARCHAR(20) NOT NULL,
         updated_by VARCHAR(20),
@@ -79,10 +92,11 @@ async function initializeDB() {
     // Indexes for better performance
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_order_id ON edi_orders(order_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_updated_at ON edi_orders(updated_at)`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_user_logs_username ON user_logs(username)`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_user_logs_timestamp ON user_logs(timestamp)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_order_number ON edi_orders(order_number)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_product_code ON edi_orders(product_code)`);
 
-    console.log('✅ Database tables initialized for order management');
+    console.log('✅ Database tables initialized with focused column structure');
+    console.log('🎯 Tracking columns:', SELECTED_COLUMNS.map(col => col.label).join(', '));
   } catch (error) {
     console.error('❌ Database initialization error:', error);
   }
@@ -122,19 +136,15 @@ function detectAndDecodeJapanese(rawBytes, fileName = '') {
   console.log('================================');
   console.log(`📁 File: ${fileName}`);
   console.log(`📊 Raw bytes length: ${rawBytes.length}`);
-  console.log(`📊 First 50 bytes (hex): ${rawBytes.slice(0, 50).toString('hex')}`);
   
   if (!iconv) {
     console.log('⚠️ iconv-lite not available, using UTF-8');
     return { content: rawBytes.toString('utf8'), encoding: 'utf8' };
   }
 
-  // Japanese encodings in priority order (Shift-JIS first for Windows files)
   const encodings = [
     { name: 'shift_jis', description: 'Shift-JIS (Most common Japanese Windows)' },
     { name: 'cp932', description: 'CP932 (Windows Japanese Extended)' },
-    { name: 'shiftjis', description: 'Shift-JIS Alternative' },
-    { name: 'sjis', description: 'SJIS (Short form)' },
     { name: 'euc-jp', description: 'EUC-JP (Unix/Linux Japanese)' },
     { name: 'iso-2022-jp', description: 'JIS (Email/Legacy Japanese)' },
     { name: 'utf8', description: 'UTF-8 (Universal)' }
@@ -159,23 +169,18 @@ function detectAndDecodeJapanese(rawBytes, fileName = '') {
         continue;
       }
 
-      // Calculate quality score
       const stats = analyzeDecodedContent(decoded);
       const score = calculateEncodingScore(stats, encoding.name);
       
       console.log(`  📊 Length: ${decoded.length} chars`);
       console.log(`  📊 Japanese chars: ${stats.japaneseChars}`);
       console.log(`  📊 Replacement chars: ${stats.replacementChars} (${(stats.replacementRatio * 100).toFixed(1)}%)`);
-      console.log(`  📊 ASCII chars: ${stats.asciiChars}`);
-      console.log(`  📊 Tab/newlines: ${stats.structuralChars}`);
       console.log(`  📊 Quality score: ${score.toFixed(2)}`);
       
       if (score > bestScore) {
         bestScore = score;
         bestResult = { content: decoded, encoding: encoding.name, description: encoding.description };
         console.log(`  ✅ New best encoding!`);
-      } else {
-        console.log(`  ⚪ Lower score than current best`);
       }
       
     } catch (err) {
@@ -185,7 +190,6 @@ function detectAndDecodeJapanese(rawBytes, fileName = '') {
 
   if (bestResult) {
     console.log(`\n🎯 FINAL DECISION: ${bestResult.encoding} - ${bestResult.description}`);
-    console.log(`📊 Final score: ${bestScore.toFixed(2)}`);
     return bestResult;
   } else {
     console.log(`\n⚠️ FALLBACK: Using UTF-8 as last resort`);
@@ -219,33 +223,28 @@ function calculateEncodingScore(stats, encodingName) {
   // Reward Japanese characters
   score += stats.japaneseChars * 10;
   
-  // Reward structural characters (tabs, newlines) - important for EDI
+  // Reward structural characters (tabs, newlines)
   score += stats.structuralChars * 5;
   
-  // Reward ASCII characters (numbers, codes) - common in EDI
+  // Reward ASCII characters
   score += stats.asciiChars * 0.5;
   
   // Bonus for Shift-JIS variants (Windows priority)
   if (encodingName.includes('shift') || encodingName.includes('sjis') || encodingName === 'cp932') {
-    score += 50; // Prioritize Shift-JIS for Japanese Windows files
-  }
-  
-  // Ensure minimum reasonable content
-  if (stats.totalChars < 10) {
-    score -= 100;
+    score += 50;
   }
   
   return score;
 }
 
-// Simplified EDI parser - focuses on extracting order data
+// 🎯 FOCUSED ORDER PARSING - Extract only selected columns
 function parseOrdersFromContent(content, fileName = '', encoding = 'unknown') {
   try {
-    console.log('🔍 PARSING EDI CONTENT FOR ORDERS');
-    console.log('=================================');
+    console.log('🎯 FOCUSED ORDER PARSING');
+    console.log('========================');
     console.log(`📁 File: ${fileName}`);
     console.log(`📊 Encoding used: ${encoding}`);
-    console.log(`📊 Content length: ${content.length} chars`);
+    console.log(`🔍 Target columns: ${SELECTED_COLUMNS.map(col => `[${col.index}] ${col.label}`).join(', ')}`);
     
     if (!content || typeof content !== 'string') {
       console.log('❌ Invalid content provided');
@@ -256,20 +255,12 @@ function parseOrdersFromContent(content, fileName = '', encoding = 'unknown') {
     console.log(`📊 Found ${lines.length} non-empty lines`);
     
     const orders = [];
-    let headerLine = null;
     
     lines.forEach((line, index) => {
       const trimmedLine = line.trim();
       
-      // Skip empty lines
-      if (trimmedLine.length === 0) return;
-      
-      // First line might be header
-      if (index === 0) {
-        headerLine = trimmedLine;
-        console.log(`📋 Header line: "${trimmedLine.substring(0, 100)}..."`);
-        return;
-      }
+      // Skip empty lines and header (first line)
+      if (trimmedLine.length === 0 || index === 0) return;
       
       // Split by tab (most common in Japanese EDI)
       let elements = trimmedLine.split('\t').map(e => e.trim());
@@ -283,54 +274,53 @@ function parseOrdersFromContent(content, fileName = '', encoding = 'unknown') {
         }
       }
       
-      // Filter out empty elements
-      elements = elements.filter(e => e.length > 0);
+      console.log(`📋 Line ${index + 1}: ${elements.length} total elements`);
       
-      // Look for order ID (LK pattern or similar)
+      // Look for order ID (LK pattern)
       let orderID = null;
-      let orderData = {};
-      
       elements.forEach((element, colIndex) => {
-        // Store all data with column index
-        orderData[`col_${colIndex}`] = element;
-        
-        // Look for order ID patterns
         if (/^LK\d+/.test(element)) {
           orderID = element;
-          orderData['order_type'] = 'LK_ORDER';
-        } else if (/^[A-Z]{2,3}\d{3,}/.test(element)) {
-          // Other order patterns
-          if (!orderID) {
-            orderID = element;
-            orderData['order_type'] = 'GENERIC_ORDER';
-          }
         }
       });
       
       if (orderID) {
-        console.log(`📦 Found order: ${orderID} with ${elements.length} fields`);
+        // Extract only the selected columns
+        const orderData = {
+          order_id: orderID
+        };
+        
+        console.log(`🎯 Extracting selected columns for order: ${orderID}`);
+        SELECTED_COLUMNS.forEach(col => {
+          const value = elements[col.index] || '';
+          orderData[col.name] = value;
+          console.log(`  📊 [${col.index}] ${col.label}: "${value}"`);
+        });
+        
         orders.push({
           orderID: orderID,
           data: orderData,
           rawSegment: trimmedLine
         });
+        
+        console.log(`✅ Order ${orderID} processed with ${SELECTED_COLUMNS.length} focused fields`);
       } else {
-        console.log(`⚪ Line ${index + 1}: No order ID found, ${elements.length} elements`);
+        console.log(`⚪ Line ${index + 1}: No LK order ID found`);
       }
     });
     
-    console.log(`✅ Extracted ${orders.length} orders from ${lines.length} lines`);
+    console.log(`✅ Extracted ${orders.length} orders with focused columns from ${lines.length} lines`);
     return orders;
     
   } catch (error) {
-    console.error('❌ Order parsing error:', error);
+    console.error('❌ Focused order parsing error:', error);
     return [];
   }
 }
 
 async function processOrders(orders, uploadedBy, fileName = '', encoding = '') {
-  console.log('🔄 PROCESSING ORDERS');
-  console.log('===================');
+  console.log('🔄 PROCESSING FOCUSED ORDERS');
+  console.log('============================');
   console.log(`👤 Uploaded by: ${uploadedBy}`);
   console.log(`📁 File: ${fileName}`);
   console.log(`📊 Orders to process: ${orders.length}`);
@@ -351,28 +341,60 @@ async function processOrders(orders, uploadedBy, fileName = '', encoding = '') {
       );
       
       if (existingOrder.rows.length === 0) {
-        // New order
+        // New order - insert with focused columns
         await pool.query(
           `INSERT INTO edi_orders 
-           (order_id, order_data, raw_segment, created_by, created_at, updated_at, encoding_used, file_name) 
-           VALUES ($1, $2, $3, $4, NOW(), NOW(), $5, $6)`,
-          [order.orderID, JSON.stringify(order.data), order.rawSegment, uploadedBy, encoding, fileName]
+           (order_id, order_number, product_code, product_name, quantity, delivery_date, 
+            raw_segment, created_by, created_at, updated_at, encoding_used, file_name) 
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), $9, $10)`,
+          [
+            order.orderID,
+            order.data.order_number || '',
+            order.data.product_code || '',
+            order.data.product_name || '',
+            order.data.quantity || '',
+            order.data.delivery_date || '',
+            order.rawSegment,
+            uploadedBy,
+            encoding,
+            fileName
+          ]
         );
         results.newOrders.push(order.orderID);
         console.log(`  ✅ Added new order: ${order.orderID}`);
+        console.log(`     📦 Product: ${order.data.product_name || 'N/A'}`);
+        console.log(`     📊 Quantity: ${order.data.quantity || 'N/A'}`);
+        console.log(`     📅 Delivery: ${order.data.delivery_date || 'N/A'}`);
       } else {
-        // Check if data changed
-        const existingData = existingOrder.rows[0].order_data;
-        const newDataString = JSON.stringify(order.data);
-        const existingDataString = JSON.stringify(existingData);
+        // Check if data changed (compare focused fields only)
+        const existing = existingOrder.rows[0];
+        let hasChanges = false;
         
-        if (newDataString !== existingDataString) {
+        SELECTED_COLUMNS.forEach(col => {
+          if (existing[col.name] !== (order.data[col.name] || '')) {
+            hasChanges = true;
+          }
+        });
+        
+        if (hasChanges) {
           await pool.query(
             `UPDATE edi_orders 
-             SET order_data = $1, raw_segment = $2, updated_by = $3, updated_at = NOW(), 
-                 encoding_used = $4, file_name = $5
-             WHERE order_id = $6`,
-            [JSON.stringify(order.data), order.rawSegment, uploadedBy, encoding, fileName, order.orderID]
+             SET order_number = $1, product_code = $2, product_name = $3, quantity = $4, 
+                 delivery_date = $5, raw_segment = $6, updated_by = $7, updated_at = NOW(), 
+                 encoding_used = $8, file_name = $9
+             WHERE order_id = $10`,
+            [
+              order.data.order_number || '',
+              order.data.product_code || '',
+              order.data.product_name || '',
+              order.data.quantity || '',
+              order.data.delivery_date || '',
+              order.rawSegment,
+              uploadedBy,
+              encoding,
+              fileName,
+              order.orderID
+            ]
           );
           results.updatedOrders.push(order.orderID);
           console.log(`  🔄 Updated order: ${order.orderID}`);
@@ -440,16 +462,17 @@ app.get('/logout', async (req, res) => {
   res.redirect('/login');
 });
 
-// Main dashboard route - focuses on orders
+// Main dashboard route - shows focused order data
 app.get('/dashboard', requireAuth, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = 50;
     const offset = (page - 1) * limit;
     
-    // Get orders with pagination
+    // Get orders with focused columns
     const orders = await pool.query(`
-      SELECT order_id, order_data, created_by, updated_by, created_at, updated_at, encoding_used, file_name
+      SELECT order_id, order_number, product_code, product_name, quantity, delivery_date,
+             created_by, updated_by, created_at, updated_at, encoding_used, file_name
       FROM edi_orders 
       ORDER BY updated_at DESC 
       LIMIT $1 OFFSET $2
@@ -475,7 +498,8 @@ app.get('/dashboard', requireAuth, async (req, res) => {
       orderStats: orderStats.rows[0] || { total_orders: 0, orders_today: 0, updated_today: 0 },
       currentPage: page,
       totalPages: totalPages,
-      total: total
+      total: total,
+      selectedColumns: SELECTED_COLUMNS
     });
   } catch (error) {
     console.error('Dashboard error:', error);
@@ -486,12 +510,13 @@ app.get('/dashboard', requireAuth, async (req, res) => {
       currentPage: 1,
       totalPages: 1,
       total: 0,
+      selectedColumns: SELECTED_COLUMNS,
       error: 'Error loading orders'
     });
   }
 });
 
-// Enhanced upload route with improved Shift-JIS detection
+// Enhanced upload route with focused column extraction
 app.post('/upload', requireAuth, async (req, res) => {
   console.log('📤 UPLOAD REQUEST RECEIVED');
   console.log('==========================');
@@ -533,7 +558,7 @@ app.post('/upload', requireAuth, async (req, res) => {
 
     console.log(`✅ Successfully decoded using: ${usedEncoding} - ${decodingResult.description}`);
 
-    // Extract and process orders
+    // Extract and process orders with focused columns
     const extractedOrders = parseOrdersFromContent(fileContent, ediFile.name, usedEncoding);
     const orderResults = await processOrders(extractedOrders, req.session.user.username, ediFile.name, usedEncoding);
     
@@ -551,7 +576,8 @@ app.post('/upload', requireAuth, async (req, res) => {
         newOrders: orderResults.newOrders.length,
         updatedOrders: orderResults.updatedOrders.length,
         unchangedOrders: orderResults.unchangedOrders.length
-      }
+      },
+      selectedColumns: SELECTED_COLUMNS
     });
 
   } catch (error) {
@@ -574,18 +600,6 @@ app.get('/api/order/:id', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Order fetch error:', error);
     res.status(500).json({ error: 'Failed to fetch order' });
-  }
-});
-
-// Database inspection endpoint (admin only)
-app.get('/api/db-inspect', requireAdmin, async (req, res) => {
-  try {
-    const { inspectDatabase } = require('./database-inspector');
-    const report = await inspectDatabase();
-    res.json({ success: true, report });
-  } catch (error) {
-    console.error('Database inspection error:', error);
-    res.status(500).json({ error: 'Database inspection failed' });
   }
 });
 
@@ -612,7 +626,8 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    features: ['order_management', 'shift_jis_priority', 'japanese_encoding']
+    features: ['focused_columns', 'japanese_encoding', 'order_management'],
+    selectedColumns: SELECTED_COLUMNS
   });
 });
 
@@ -632,11 +647,14 @@ app.use((req, res) => {
 });
 
 app.listen(PORT, async () => {
-  console.log(`🚀 Order Management System running on port ${PORT}`);
+  console.log(`🚀 Focused Order Management System running on port ${PORT}`);
   console.log(`🌐 Access: http://localhost:${PORT}`);
   console.log(`🗄️  Database: Neon PostgreSQL`);
   console.log(`🇯🇵 Priority encoding: Shift-JIS (Japanese Windows)`);
-  console.log(`📦 Focus: Order Management Dashboard`);
+  console.log(`🎯 Focused columns: ${SELECTED_COLUMNS.length} selected fields`);
+  SELECTED_COLUMNS.forEach(col => {
+    console.log(`   📊 [${col.index}] ${col.label} (${col.description})`);
+  });
   await initializeDB();
 });
 
