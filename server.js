@@ -21,14 +21,24 @@ const SELECTED_COLUMNS = [
   { index: 27, name: 'delivery_date', label: '納期', description: 'Delivery Date' }
 ];
 
-// Validate environment variables
+// Validate environment variables with detailed logging
+console.log('🔧 Checking environment variables...');
 if (!process.env.POSTGRES_URL && !process.env.DATABASE_URL) {
   console.error('❌ Missing POSTGRES_URL or DATABASE_URL environment variable');
+  console.error('💡 Please set your Neon database connection string in Vercel environment variables');
 }
 
 if (!process.env.SESSION_SECRET) {
   console.error('❌ Missing SESSION_SECRET environment variable');
+  console.error('💡 Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
 }
+
+console.log('Environment check:', {
+  NODE_ENV: process.env.NODE_ENV,
+  POSTGRES_URL: process.env.POSTGRES_URL ? '✅ SET' : '❌ MISSING',
+  SESSION_SECRET: process.env.SESSION_SECRET ? '✅ SET' : '❌ MISSING',
+  VERCEL: process.env.VERCEL ? '✅ DETECTED' : 'Local'
+});
 
 // PostgreSQL connection with serverless optimization
 const pool = new Pool({
@@ -69,30 +79,37 @@ app.use(fileUpload({
   abortOnLimit: true
 }));
 
-// Session configuration
+// Session configuration with enhanced settings for Vercel
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'fallback-secret-change-this',
+  secret: process.env.SESSION_SECRET || 'fallback-secret-change-this-immediately',
   resave: false,
   saveUninitialized: false,
   cookie: { 
     secure: process.env.NODE_ENV === 'production',
     maxAge: 24 * 60 * 60 * 1000,
-    httpOnly: true
-  }
+    httpOnly: true,
+    sameSite: 'lax'
+  },
+  name: 'order_management_session'
 }));
 
-// Database initialization - happens on first request in serverless
+// Database initialization - enhanced for serverless
 let dbInitialized = false;
 
 async function initializeDB() {
   if (dbInitialized) return true;
   
   try {
-    console.log('🗄️ Initializing database...');
+    console.log('🗄️ Initializing database for serverless environment...');
     
-    // Test connection
-    await pool.query('SELECT NOW()');
-    console.log('✅ Database connection successful');
+    // Test connection first with timeout
+    const testPromise = pool.query('SELECT NOW()');
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Database connection timeout')), 10000)
+    );
+    
+    const result = await Promise.race([testPromise, timeoutPromise]);
+    console.log('✅ Database connection successful at:', result.rows[0].now);
     
     // Create user_logs table
     await pool.query(`
@@ -106,7 +123,7 @@ async function initializeDB() {
       )
     `);
     
-    // Create edi_orders table
+    // Create edi_orders table with all required columns
     await pool.query(`
       CREATE TABLE IF NOT EXISTS edi_orders (
         id SERIAL PRIMARY KEY,
@@ -126,7 +143,7 @@ async function initializeDB() {
       )
     `);
 
-    // Create indexes
+    // Create indexes for better performance
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_order_id ON edi_orders(order_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_updated_at ON edi_orders(updated_at)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_order_number ON edi_orders(order_number)`);
@@ -137,14 +154,37 @@ async function initializeDB() {
     return true;
   } catch (error) {
     console.error('❌ Database initialization error:', error);
-    return false;
+    console.error('Connection string length:', (process.env.POSTGRES_URL || process.env.DATABASE_URL || '').length);
+    console.error('SSL mode:', process.env.NODE_ENV === 'production' ? 'enabled' : 'disabled');
+    throw error;
   }
 }
 
-// Middleware to ensure DB is initialized
+// Enhanced middleware to ensure DB is initialized with better error handling
 app.use(async (req, res, next) => {
+  // Skip database init for static files and debug routes
+  if (req.path.startsWith('/public') || req.path === '/test' || req.path === '/debug') {
+    return next();
+  }
+  
   if (!dbInitialized) {
-    await initializeDB();
+    try {
+      await initializeDB();
+    } catch (error) {
+      console.error('Database initialization failed in middleware:', error);
+      
+      // For health check, let it through to show the error
+      if (req.path === '/health') {
+        return next();
+      }
+      
+      // For other routes, show a user-friendly error
+      return res.status(500).render('error', { 
+        message: 'Database connection failed. Please check configuration.',
+        user: null,
+        error: process.env.NODE_ENV === 'development' ? error : null
+      });
+    }
   }
   next();
 });
@@ -375,16 +415,88 @@ async function processOrders(orders, uploadedBy, fileName = '', encoding = '') {
 
 // ROUTES
 
+// Debug route for troubleshooting (add before other routes)
+app.get('/debug', (req, res) => {
+  const debugInfo = {
+    timestamp: new Date().toISOString(),
+    environment: {
+      NODE_ENV: process.env.NODE_ENV,
+      hasPostgresUrl: !!process.env.POSTGRES_URL,
+      hasDatabaseUrl: !!process.env.DATABASE_URL,
+      hasSessionSecret: !!process.env.SESSION_SECRET,
+      postgresUrlLength: process.env.POSTGRES_URL ? process.env.POSTGRES_URL.length : 0,
+      sessionSecretLength: process.env.SESSION_SECRET ? process.env.SESSION_SECRET.length : 0
+    },
+    directories: {
+      __dirname: __dirname,
+      viewsPath: path.join(__dirname, 'views'),
+      publicPath: path.join(__dirname, 'public'),
+      nodeModulesExists: fs.existsSync(path.join(__dirname, 'node_modules'))
+    },
+    files: {
+      serverJs: 'loaded successfully',
+      loginEjs: fs.existsSync(path.join(__dirname, 'views', 'login.ejs')),
+      dashboardEjs: fs.existsSync(path.join(__dirname, 'views', 'dashboard.ejs')),
+      errorEjs: fs.existsSync(path.join(__dirname, 'views', 'error.ejs')),
+      packageJson: fs.existsSync(path.join(__dirname, 'package.json'))
+    },
+    database: {
+      initialized: dbInitialized,
+      poolOptions: {
+        ssl: process.env.NODE_ENV === 'production' ? 'enabled' : 'disabled'
+      }
+    },
+    vercel: {
+      isVercel: !!process.env.VERCEL,
+      region: process.env.VERCEL_REGION || 'unknown',
+      deploymentUrl: process.env.VERCEL_URL || 'unknown'
+    },
+    selectedColumns: SELECTED_COLUMNS
+  };
+
+  res.json(debugInfo);
+});
+
+// Simple test route that doesn't require database
+app.get('/test', (req, res) => {
+  res.json({ 
+    status: 'Server is running',
+    timestamp: new Date().toISOString(),
+    message: 'This route works without database connection',
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+// Root route with enhanced error handling
 app.get('/', (req, res) => {
-  if (req.session.user) {
-    res.redirect('/dashboard');
-  } else {
-    res.redirect('/login');
+  try {
+    if (req.session && req.session.user) {
+      res.redirect('/dashboard');
+    } else {
+      res.redirect('/login');
+    }
+  } catch (error) {
+    console.error('Root route error:', error);
+    // Fallback if session middleware fails
+    try {
+      res.render('login', { error: 'System starting up, please try again in a moment.' });
+    } catch (renderError) {
+      console.error('Render error:', renderError);
+      res.status(500).json({ 
+        error: 'System initialization error',
+        message: 'Please check server configuration'
+      });
+    }
   }
 });
 
 app.get('/login', (req, res) => {
-  res.render('login', { error: null });
+  try {
+    res.render('login', { error: null });
+  } catch (error) {
+    console.error('Login render error:', error);
+    res.status(500).json({ error: 'Template rendering failed', details: error.message });
+  }
 });
 
 app.post('/login', async (req, res) => {
@@ -568,50 +680,120 @@ app.get('/logs', requireAdmin, async (req, res) => {
   }
 });
 
+// Enhanced health check route
 app.get('/health', async (req, res) => {
   try {
-    await pool.query('SELECT 1');
+    const result = await pool.query('SELECT NOW()');
+    
+    // Test table existence
+    let tablesExist = false;
+    try {
+      await pool.query('SELECT 1 FROM edi_orders LIMIT 1');
+      await pool.query('SELECT 1 FROM user_logs LIMIT 1');
+      tablesExist = true;
+    } catch (tableError) {
+      console.log('Tables not yet created:', tableError.message);
+    }
+    
     res.json({ 
       status: 'healthy', 
       timestamp: new Date().toISOString(),
       database: 'connected',
+      dbTime: result.rows[0].now,
+      dbInitialized: dbInitialized,
+      tablesExist: tablesExist,
+      environment: {
+        NODE_ENV: process.env.NODE_ENV,
+        hasPostgresUrl: !!process.env.POSTGRES_URL,
+        hasSessionSecret: !!process.env.SESSION_SECRET,
+        isVercel: !!process.env.VERCEL
+      },
       features: ['focused_columns', 'japanese_encoding', 'order_management'],
       selectedColumns: SELECTED_COLUMNS
     });
   } catch (error) {
+    console.error('Health check failed:', error);
     res.status(500).json({ 
       status: 'unhealthy', 
       timestamp: new Date().toISOString(),
       database: 'disconnected',
-      error: error.message
+      error: error.message,
+      dbInitialized: dbInitialized,
+      environment: {
+        NODE_ENV: process.env.NODE_ENV,
+        hasPostgresUrl: !!process.env.POSTGRES_URL,
+        hasDatabaseUrl: !!process.env.DATABASE_URL,
+        hasSessionSecret: !!process.env.SESSION_SECRET,
+        isVercel: !!process.env.VERCEL,
+        postgresUrlLength: process.env.POSTGRES_URL ? process.env.POSTGRES_URL.length : 0
+      }
     });
   }
 });
 
 // Error handlers
 app.use((err, req, res, next) => {
-  console.error('❌ Error:', err);
-  res.status(500).render('error', { 
-    message: 'Something went wrong!',
-    user: req.session.user || null
-  });
+  console.error('❌ Unhandled Error:', err);
+  
+  // Handle specific error types
+  if (err.code === 'ECONNREFUSED') {
+    return res.status(500).render('error', { 
+      message: 'Database connection refused. Please check your database configuration.',
+      user: req.session?.user || null
+    });
+  }
+  
+  if (err.code === 'ENOTFOUND') {
+    return res.status(500).render('error', { 
+      message: 'Database host not found. Please check your connection string.',
+      user: req.session?.user || null
+    });
+  }
+  
+  // Try to render error page, fallback to JSON if that fails
+  try {
+    res.status(500).render('error', { 
+      message: 'Something went wrong!',
+      user: req.session?.user || null
+    });
+  } catch (renderError) {
+    console.error('Error page render failed:', renderError);
+    res.status(500).json({
+      error: 'Server error',
+      message: 'Unable to render error page'
+    });
+  }
 });
 
 app.use((req, res) => {
-  res.status(404).render('error', { 
-    message: 'Page not found',
-    user: req.session.user || null
-  });
+  try {
+    res.status(404).render('error', { 
+      message: 'Page not found',
+      user: req.session?.user || null
+    });
+  } catch (renderError) {
+    console.error('404 page render failed:', renderError);
+    res.status(404).json({
+      error: 'Page not found',
+      message: 'The requested page could not be found'
+    });
+  }
 });
 
-// Export for Vercel
+// Export for Vercel (always export)
 module.exports = app;
 
-// Local development server
-if (require.main === module) {
+// Only start server if running locally (not in Vercel)
+if (process.env.NODE_ENV !== 'production' && require.main === module) {
   app.listen(PORT, async () => {
     console.log(`🚀 Order Management System running on port ${PORT}`);
     console.log(`🌐 Access: http://localhost:${PORT}`);
-    await initializeDB();
+    console.log(`🔧 Environment: ${process.env.NODE_ENV || 'development'}`);
+    try {
+      await initializeDB();
+      console.log('✅ Database initialized for local development');
+    } catch (error) {
+      console.error('❌ Failed to initialize database on startup:', error);
+    }
   });
 }
