@@ -3,13 +3,12 @@ const session = require('express-session');
 const fileUpload = require('express-fileupload');
 const bodyParser = require('body-parser');
 const path = require('path');
-const bcrypt = require('bcryptjs');
 const { Pool } = require('pg');
 const fs = require('fs');
 let iconv;
 try {
   iconv = require('iconv-lite');
-  console.log('✅ iconv-lite loaded successfully');
+  console.log('✅ iconv-lite loaded successfully for Japanese encoding');
 } catch (err) {
   console.log('⚠️ iconv-lite not available, using basic encoding');
 }
@@ -46,9 +45,10 @@ app.use(session({
   }
 }));
 
-// Database initialization with order management
+// Database initialization - simplified for orders only
 async function initializeDB() {
   try {
+    // Basic user logs table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS user_logs (
         id SERIAL PRIMARY KEY,
@@ -60,32 +60,7 @@ async function initializeDB() {
       )
     `);
     
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS edi_files (
-        id SERIAL PRIMARY KEY,
-        filename VARCHAR(255) NOT NULL,
-        original_filename VARCHAR(255) NOT NULL,
-        file_content TEXT NOT NULL,
-        parsed_data JSONB,
-        uploaded_by VARCHAR(20) NOT NULL,
-        upload_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        file_size INTEGER
-      )
-    `);
-    
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS edi_changes (
-        id SERIAL PRIMARY KEY,
-        file_id INTEGER REFERENCES edi_files(id),
-        change_type VARCHAR(50) NOT NULL,
-        old_data JSONB,
-        new_data JSONB,
-        changed_by VARCHAR(20) NOT NULL,
-        change_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // New table for order management
+    // Orders table - main focus
     await pool.query(`
       CREATE TABLE IF NOT EXISTS edi_orders (
         id SERIAL PRIMARY KEY,
@@ -95,25 +70,19 @@ async function initializeDB() {
         created_by VARCHAR(20) NOT NULL,
         updated_by VARCHAR(20),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        encoding_used VARCHAR(20),
+        file_name VARCHAR(255)
       )
     `);
 
     // Indexes for better performance
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_edi_orders_order_id ON edi_orders(order_id);
-    `);
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_edi_orders_updated_at ON edi_orders(updated_at);
-    `);
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_edi_files_uploaded_by ON edi_files(uploaded_by);
-    `);
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_user_logs_username ON user_logs(username);
-    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_order_id ON edi_orders(order_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_edi_orders_updated_at ON edi_orders(updated_at)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_user_logs_username ON user_logs(username)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_user_logs_timestamp ON user_logs(timestamp)`);
 
-    console.log('✅ Database tables initialized with order management');
+    console.log('✅ Database tables initialized for order management');
   } catch (error) {
     console.error('❌ Database initialization error:', error);
   }
@@ -141,188 +110,275 @@ async function logUserActivity(username, userType, action, ipAddress) {
       'INSERT INTO user_logs (username, user_type, action, ip_address) VALUES ($1, $2, $3, $4)',
       [username, userType, action, ipAddress]
     );
+    console.log(`📝 Logged activity: ${username} (${userType}) - ${action} from ${ipAddress}`);
   } catch (error) {
     console.error('Logging error:', error);
   }
 }
 
-// Enhanced EDI parser
-function parseEDIData(ediContent) {
-  console.log('🔍 Starting EDI parsing...');
-  console.log('📄 Content length:', ediContent ? ediContent.length : 'null');
+// Enhanced Japanese encoding detection with Shift-JIS priority
+function detectAndDecodeJapanese(rawBytes, fileName = '') {
+  console.log('🇯🇵 JAPANESE ENCODING DETECTION');
+  console.log('================================');
+  console.log(`📁 File: ${fileName}`);
+  console.log(`📊 Raw bytes length: ${rawBytes.length}`);
+  console.log(`📊 First 50 bytes (hex): ${rawBytes.slice(0, 50).toString('hex')}`);
   
-  try {
-    if (!ediContent || typeof ediContent !== 'string' || ediContent.trim().length === 0) {
-      return { 
-        error: 'Empty content', 
-        message: 'File content is empty or invalid',
-        totalSegments: 0,
-        segments: []
-      };
-    }
+  if (!iconv) {
+    console.log('⚠️ iconv-lite not available, using UTF-8');
+    return { content: rawBytes.toString('utf8'), encoding: 'utf8' };
+  }
 
-    const cleanContent = ediContent.trim();
-    console.log('🧹 Cleaned length:', cleanContent.length);
-    console.log('📄 First 100 chars:', JSON.stringify(cleanContent.substring(0, 100)));
+  // Japanese encodings in priority order (Shift-JIS first for Windows files)
+  const encodings = [
+    { name: 'shift_jis', description: 'Shift-JIS (Most common Japanese Windows)' },
+    { name: 'cp932', description: 'CP932 (Windows Japanese Extended)' },
+    { name: 'shiftjis', description: 'Shift-JIS Alternative' },
+    { name: 'sjis', description: 'SJIS (Short form)' },
+    { name: 'euc-jp', description: 'EUC-JP (Unix/Linux Japanese)' },
+    { name: 'iso-2022-jp', description: 'JIS (Email/Legacy Japanese)' },
+    { name: 'utf8', description: 'UTF-8 (Universal)' }
+  ];
 
-    // Split into lines
-    const lines = cleanContent.split(/\r?\n/).filter(line => line.trim().length > 0);
-    console.log('📊 Found lines:', lines.length);
+  let bestResult = null;
+  let bestScore = -1;
 
-    if (lines.length === 0) {
-      return {
-        error: 'No data lines',
-        message: 'No parseable data lines found',
-        totalSegments: 0,
-        segments: []
-      };
-    }
-
-    const parsed = {
-      totalSegments: lines.length,
-      segments: [],
-      fileInfo: {
-        originalLength: ediContent.length,
-        cleanedLength: cleanContent.length,
-        detectedFormat: 'Tab-separated Japanese business data',
-        lineCount: lines.length,
-        encoding: 'Japanese (Shift_JIS/CP932)'
-      }
-    };
-
-    // Process each line
-    lines.forEach((line, index) => {
-      const trimmedLine = line.trim();
-      if (trimmedLine.length === 0) return;
-
-      let elements = [];
-      let separator = 'none';
-
-      if (trimmedLine.includes('\t')) {
-        elements = trimmedLine.split('\t').map(e => e.trim()).filter(e => e.length > 0);
-        separator = 'tab';
-      } else if (trimmedLine.includes('  ')) {
-        elements = trimmedLine.split(/\s{2,}/).map(e => e.trim()).filter(e => e.length > 0);
-        separator = 'double_space';
-      } else if (trimmedLine.includes(' ')) {
-        elements = trimmedLine.split(/\s+/).map(e => e.trim()).filter(e => e.length > 0);
-        separator = 'space';
+  for (const encoding of encodings) {
+    try {
+      console.log(`\n🔍 Testing ${encoding.name} - ${encoding.description}:`);
+      
+      let decoded;
+      if (encoding.name === 'utf8') {
+        decoded = rawBytes.toString('utf8');
       } else {
-        elements = [trimmedLine];
-        separator = 'none';
+        decoded = iconv.decode(rawBytes, encoding.name);
+      }
+      
+      if (!decoded || decoded.length === 0) {
+        console.log(`  ❌ Failed: No content decoded`);
+        continue;
       }
 
-      console.log(`📊 Line ${index + 1}: ${elements.length} elements (${separator})`);
+      // Calculate quality score
+      const stats = analyzeDecodedContent(decoded);
+      const score = calculateEncodingScore(stats, encoding.name);
+      
+      console.log(`  📊 Length: ${decoded.length} chars`);
+      console.log(`  📊 Japanese chars: ${stats.japaneseChars}`);
+      console.log(`  📊 Replacement chars: ${stats.replacementChars} (${(stats.replacementRatio * 100).toFixed(1)}%)`);
+      console.log(`  📊 ASCII chars: ${stats.asciiChars}`);
+      console.log(`  📊 Tab/newlines: ${stats.structuralChars}`);
+      console.log(`  📊 Quality score: ${score.toFixed(2)}`);
+      
+      if (score > bestScore) {
+        bestScore = score;
+        bestResult = { content: decoded, encoding: encoding.name, description: encoding.description };
+        console.log(`  ✅ New best encoding!`);
+      } else {
+        console.log(`  ⚪ Lower score than current best`);
+      }
+      
+    } catch (err) {
+      console.log(`  ❌ Failed: ${err.message}`);
+    }
+  }
 
-      parsed.segments.push({
-        index: index + 1,
-        type: index === 0 ? 'HEADER' : 'DATA',
-        elements: elements,
-        raw: trimmedLine,
-        elementCount: elements.length,
-        separator: separator,
-        isHeader: index === 0
-      });
-    });
-
-    parsed.statistics = {
-      totalSegments: parsed.segments.length,
-      headerRows: parsed.segments.filter(s => s.type === 'HEADER').length,
-      dataRows: parsed.segments.filter(s => s.type === 'DATA').length,
-      averageElementsPerRow: parsed.segments.length > 0 
-        ? Math.round(parsed.segments.reduce((sum, s) => sum + s.elementCount, 0) / parsed.segments.length)
-        : 0
-    };
-
-    console.log('✅ Parsing completed successfully');
-    console.log('📊 Statistics:', parsed.statistics);
-    return parsed;
-
-  } catch (error) {
-    console.error('❌ Parsing error:', error);
-    return { 
-      error: 'Parsing failed', 
-      message: error.message,
-      totalSegments: 0,
-      segments: []
-    };
+  if (bestResult) {
+    console.log(`\n🎯 FINAL DECISION: ${bestResult.encoding} - ${bestResult.description}`);
+    console.log(`📊 Final score: ${bestScore.toFixed(2)}`);
+    return bestResult;
+  } else {
+    console.log(`\n⚠️ FALLBACK: Using UTF-8 as last resort`);
+    return { content: rawBytes.toString('utf8'), encoding: 'utf8', description: 'UTF-8 (Fallback)' };
   }
 }
 
-// Order management functions
-function extractOrderInfo(segments) {
-  const orders = [];
+function analyzeDecodedContent(content) {
+  const japaneseChars = (content.match(/[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF]/g) || []).length;
+  const replacementChars = (content.match(/�/g) || []).length;
+  const asciiChars = (content.match(/[\x00-\x7F]/g) || []).length;
+  const structuralChars = (content.match(/[\t\r\n]/g) || []).length;
+  const totalChars = content.length;
   
-  segments.forEach((segment, index) => {
-    if (segment.type === 'DATA' && segment.elements) {
-      // Find LK order ID (usually in early columns)
+  return {
+    japaneseChars,
+    replacementChars,
+    replacementRatio: totalChars > 0 ? replacementChars / totalChars : 1,
+    asciiChars,
+    structuralChars,
+    totalChars
+  };
+}
+
+function calculateEncodingScore(stats, encodingName) {
+  let score = 0;
+  
+  // Heavily penalize replacement characters
+  score -= stats.replacementRatio * 1000;
+  
+  // Reward Japanese characters
+  score += stats.japaneseChars * 10;
+  
+  // Reward structural characters (tabs, newlines) - important for EDI
+  score += stats.structuralChars * 5;
+  
+  // Reward ASCII characters (numbers, codes) - common in EDI
+  score += stats.asciiChars * 0.5;
+  
+  // Bonus for Shift-JIS variants (Windows priority)
+  if (encodingName.includes('shift') || encodingName.includes('sjis') || encodingName === 'cp932') {
+    score += 50; // Prioritize Shift-JIS for Japanese Windows files
+  }
+  
+  // Ensure minimum reasonable content
+  if (stats.totalChars < 10) {
+    score -= 100;
+  }
+  
+  return score;
+}
+
+// Simplified EDI parser - focuses on extracting order data
+function parseOrdersFromContent(content, fileName = '', encoding = 'unknown') {
+  try {
+    console.log('🔍 PARSING EDI CONTENT FOR ORDERS');
+    console.log('=================================');
+    console.log(`📁 File: ${fileName}`);
+    console.log(`📊 Encoding used: ${encoding}`);
+    console.log(`📊 Content length: ${content.length} chars`);
+    
+    if (!content || typeof content !== 'string') {
+      console.log('❌ Invalid content provided');
+      return [];
+    }
+
+    const lines = content.split(/\r?\n/).filter(line => line.trim().length > 0);
+    console.log(`📊 Found ${lines.length} non-empty lines`);
+    
+    const orders = [];
+    let headerLine = null;
+    
+    lines.forEach((line, index) => {
+      const trimmedLine = line.trim();
+      
+      // Skip empty lines
+      if (trimmedLine.length === 0) return;
+      
+      // First line might be header
+      if (index === 0) {
+        headerLine = trimmedLine;
+        console.log(`📋 Header line: "${trimmedLine.substring(0, 100)}..."`);
+        return;
+      }
+      
+      // Split by tab (most common in Japanese EDI)
+      let elements = trimmedLine.split('\t').map(e => e.trim());
+      
+      // If no tabs, try other separators
+      if (elements.length === 1) {
+        if (trimmedLine.includes('|')) {
+          elements = trimmedLine.split('|').map(e => e.trim());
+        } else if (trimmedLine.includes(',')) {
+          elements = trimmedLine.split(',').map(e => e.trim());
+        }
+      }
+      
+      // Filter out empty elements
+      elements = elements.filter(e => e.length > 0);
+      
+      // Look for order ID (LK pattern or similar)
       let orderID = null;
       let orderData = {};
       
-      segment.elements.forEach((element, colIndex) => {
-        // Look for LK pattern (order ID)
-        if (/^LK\d+/.test(element)) {
-          orderID = element;
-        }
+      elements.forEach((element, colIndex) => {
         // Store all data with column index
         orderData[`col_${colIndex}`] = element;
+        
+        // Look for order ID patterns
+        if (/^LK\d+/.test(element)) {
+          orderID = element;
+          orderData['order_type'] = 'LK_ORDER';
+        } else if (/^[A-Z]{2,3}\d{3,}/.test(element)) {
+          // Other order patterns
+          if (!orderID) {
+            orderID = element;
+            orderData['order_type'] = 'GENERIC_ORDER';
+          }
+        }
       });
       
       if (orderID) {
+        console.log(`📦 Found order: ${orderID} with ${elements.length} fields`);
         orders.push({
           orderID: orderID,
-          rowIndex: index,
           data: orderData,
-          rawSegment: segment.raw
+          rawSegment: trimmedLine
         });
+      } else {
+        console.log(`⚪ Line ${index + 1}: No order ID found, ${elements.length} elements`);
       }
-    }
-  });
-  
-  return orders;
+    });
+    
+    console.log(`✅ Extracted ${orders.length} orders from ${lines.length} lines`);
+    return orders;
+    
+  } catch (error) {
+    console.error('❌ Order parsing error:', error);
+    return [];
+  }
 }
 
-async function processOrderUpdates(newOrders, uploadedBy) {
+async function processOrders(orders, uploadedBy, fileName = '', encoding = '') {
+  console.log('🔄 PROCESSING ORDERS');
+  console.log('===================');
+  console.log(`👤 Uploaded by: ${uploadedBy}`);
+  console.log(`📁 File: ${fileName}`);
+  console.log(`📊 Orders to process: ${orders.length}`);
+  
   const results = {
     newOrders: [],
     updatedOrders: [],
-    unchangedOrders: [],
-    summary: {}
+    unchangedOrders: []
   };
   
-  for (const order of newOrders) {
+  for (const order of orders) {
     try {
-      // Check if order exists in database
+      console.log(`🔍 Processing order: ${order.orderID}`);
+      
       const existingOrder = await pool.query(
         'SELECT * FROM edi_orders WHERE order_id = $1',
         [order.orderID]
       );
       
       if (existingOrder.rows.length === 0) {
-        // New order - insert
+        // New order
         await pool.query(
-          `INSERT INTO edi_orders (order_id, order_data, raw_segment, created_by, created_at, updated_at) 
-           VALUES ($1, $2, $3, $4, NOW(), NOW())`,
-          [order.orderID, JSON.stringify(order.data), order.rawSegment, uploadedBy]
+          `INSERT INTO edi_orders 
+           (order_id, order_data, raw_segment, created_by, created_at, updated_at, encoding_used, file_name) 
+           VALUES ($1, $2, $3, $4, NOW(), NOW(), $5, $6)`,
+          [order.orderID, JSON.stringify(order.data), order.rawSegment, uploadedBy, encoding, fileName]
         );
         results.newOrders.push(order.orderID);
+        console.log(`  ✅ Added new order: ${order.orderID}`);
       } else {
-        // Existing order - check if data changed
+        // Check if data changed
         const existingData = existingOrder.rows[0].order_data;
         const newDataString = JSON.stringify(order.data);
         const existingDataString = JSON.stringify(existingData);
         
         if (newDataString !== existingDataString) {
-          // Data changed - update
           await pool.query(
-            `UPDATE edi_orders SET order_data = $1, raw_segment = $2, updated_by = $3, updated_at = NOW() 
-             WHERE order_id = $4`,
-            [JSON.stringify(order.data), order.rawSegment, uploadedBy, order.orderID]
+            `UPDATE edi_orders 
+             SET order_data = $1, raw_segment = $2, updated_by = $3, updated_at = NOW(), 
+                 encoding_used = $4, file_name = $5
+             WHERE order_id = $6`,
+            [JSON.stringify(order.data), order.rawSegment, uploadedBy, encoding, fileName, order.orderID]
           );
           results.updatedOrders.push(order.orderID);
+          console.log(`  🔄 Updated order: ${order.orderID}`);
         } else {
-          // No changes
           results.unchangedOrders.push(order.orderID);
+          console.log(`  ⚪ No changes for order: ${order.orderID}`);
         }
       }
     } catch (error) {
@@ -330,13 +386,7 @@ async function processOrderUpdates(newOrders, uploadedBy) {
     }
   }
   
-  results.summary = {
-    total: newOrders.length,
-    new: results.newOrders.length,
-    updated: results.updatedOrders.length,
-    unchanged: results.unchangedOrders.length
-  };
-  
+  console.log(`📊 Processing complete: ${results.newOrders.length} new, ${results.updatedOrders.length} updated, ${results.unchangedOrders.length} unchanged`);
   return results;
 }
 
@@ -390,11 +440,25 @@ app.get('/logout', async (req, res) => {
   res.redirect('/login');
 });
 
+// Main dashboard route - focuses on orders
 app.get('/dashboard', requireAuth, async (req, res) => {
   try {
-    const files = await pool.query(
-      'SELECT id, original_filename, upload_timestamp, uploaded_by, file_size FROM edi_files ORDER BY upload_timestamp DESC LIMIT 10'
-    );
+    const page = parseInt(req.query.page) || 1;
+    const limit = 50;
+    const offset = (page - 1) * limit;
+    
+    // Get orders with pagination
+    const orders = await pool.query(`
+      SELECT order_id, order_data, created_by, updated_by, created_at, updated_at, encoding_used, file_name
+      FROM edi_orders 
+      ORDER BY updated_at DESC 
+      LIMIT $1 OFFSET $2
+    `, [limit, offset]);
+    
+    // Get total count for pagination
+    const totalCount = await pool.query('SELECT COUNT(*) FROM edi_orders');
+    const total = parseInt(totalCount.rows[0].count);
+    const totalPages = Math.ceil(total / limit);
     
     // Get order statistics
     const orderStats = await pool.query(`
@@ -407,24 +471,30 @@ app.get('/dashboard', requireAuth, async (req, res) => {
     
     res.render('dashboard', { 
       user: req.session.user,
-      recentFiles: files.rows,
-      orderStats: orderStats.rows[0] || { total_orders: 0, orders_today: 0, updated_today: 0 }
+      orders: orders.rows,
+      orderStats: orderStats.rows[0] || { total_orders: 0, orders_today: 0, updated_today: 0 },
+      currentPage: page,
+      totalPages: totalPages,
+      total: total
     });
   } catch (error) {
     console.error('Dashboard error:', error);
     res.render('dashboard', { 
       user: req.session.user,
-      recentFiles: [],
+      orders: [],
       orderStats: { total_orders: 0, orders_today: 0, updated_today: 0 },
-      error: 'Error loading recent files'
+      currentPage: 1,
+      totalPages: 1,
+      total: 0,
+      error: 'Error loading orders'
     });
   }
 });
 
-// Enhanced upload route with Japanese encoding and order management
+// Enhanced upload route with improved Shift-JIS detection
 app.post('/upload', requireAuth, async (req, res) => {
-  console.log('📤 UPLOAD DEBUG - Japanese & Order Management');
-  console.log('==============================================');
+  console.log('📤 UPLOAD REQUEST RECEIVED');
+  console.log('==========================');
   
   try {
     if (!req.files || !req.files.ediFile) {
@@ -434,13 +504,9 @@ app.post('/upload', requireAuth, async (req, res) => {
     const ediFile = req.files.ediFile;
     const clientIP = req.ip || req.connection.remoteAddress;
 
-    console.log('📁 File info:');
-    console.log('  Name:', ediFile.name);
-    console.log('  Size:', ediFile.size);
-    console.log('  Has data buffer:', !!ediFile.data);
-    console.log('  Data buffer length:', ediFile.data ? ediFile.data.length : 0);
-    console.log('  Has temp path:', !!ediFile.tempFilePath);
-    console.log('  Temp path:', ediFile.tempFilePath);
+    console.log(`📁 File: ${ediFile.name}`);
+    console.log(`📊 Size: ${ediFile.size} bytes`);
+    console.log(`👤 User: ${req.session.user.username}`);
 
     // Validate file
     const fileName = ediFile.name.toLowerCase();
@@ -450,160 +516,41 @@ app.post('/upload', requireAuth, async (req, res) => {
       });
     }
 
-    if (ediFile.size > 50 * 1024 * 1024) {
-      return res.status(400).json({ error: 'File too large. Max 50MB' });
-    }
-
-    // Read file content - handle both data buffer and temp file
+    // Read file content
     let rawBytes = null;
-    let fileContent = null;
-    
-    // Try data buffer first
     if (ediFile.data && ediFile.data.length > 0) {
-      console.log('📁 Using data buffer');
       rawBytes = ediFile.data;
-    }
-    // Fallback to temp file
-    else if (ediFile.tempFilePath && fs.existsSync(ediFile.tempFilePath)) {
-      console.log('📁 Reading temp file:', ediFile.tempFilePath);
-      try {
-        rawBytes = fs.readFileSync(ediFile.tempFilePath);
-        console.log('✅ Temp file read success, length:', rawBytes.length);
-      } catch (tempError) {
-        console.error('❌ Temp file read failed:', tempError);
-        return res.status(400).json({ 
-          error: 'Cannot read uploaded file',
-          details: tempError.message
-        });
-      }
+    } else if (ediFile.tempFilePath && fs.existsSync(ediFile.tempFilePath)) {
+      rawBytes = fs.readFileSync(ediFile.tempFilePath);
     } else {
-      return res.status(400).json({ 
-        error: 'File data not accessible',
-        debug: {
-          hasData: !!ediFile.data,
-          hasTemp: !!ediFile.tempFilePath,
-          dataLen: ediFile.data ? ediFile.data.length : 0
-        }
-      });
+      return res.status(400).json({ error: 'File data not accessible' });
     }
 
-    if (!rawBytes || rawBytes.length === 0) {
-      return res.status(400).json({ error: 'File appears empty' });
-    }
+    // Decode with improved Japanese detection
+    const decodingResult = detectAndDecodeJapanese(rawBytes, ediFile.name);
+    const fileContent = decodingResult.content;
+    const usedEncoding = decodingResult.encoding;
 
-    console.log('📊 Raw bytes length:', rawBytes.length);
-    console.log('📊 First 50 bytes (hex):', rawBytes.slice(0, 50).toString('hex'));
-
-    // ENHANCED JAPANESE ENCODING DETECTION
-    try {
-      fileContent = null;
-      
-      // First try Japanese encodings since we know this is Japanese data
-      if (iconv) {
-        console.log('🇯🇵 Trying Japanese encodings first...');
-        const japaneseEncodings = ['shift_jis', 'cp932', 'euc-jp', 'iso-2022-jp'];
-        
-        for (const encoding of japaneseEncodings) {
-          try {
-            const decoded = iconv.decode(rawBytes, encoding);
-            console.log(`📊 ${encoding}: length ${decoded.length}`);
-            
-            // Check if this looks like good Japanese text
-            const hasJapanese = /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FAF]/.test(decoded);
-            const replacementChars = (decoded.match(/�/g) || []).length;
-            const replacementRatio = replacementChars / decoded.length;
-            
-            console.log(`📊 ${encoding}: Japanese chars: ${hasJapanese}, replacements: ${replacementChars}, ratio: ${replacementRatio.toFixed(3)}`);
-            
-            if (hasJapanese && replacementRatio < 0.01) {
-              console.log(`✅ ${encoding} looks perfect for Japanese text!`);
-              fileContent = decoded;
-              break;
-            } else if (replacementRatio < 0.02) {
-              console.log(`✅ ${encoding} looks good, using it`);
-              fileContent = decoded;
-              break;
-            }
-          } catch (err) {
-            console.log(`❌ ${encoding} failed:`, err.message);
-          }
-        }
-      }
-      
-      // Fallback to UTF-8 if no Japanese encoding worked
-      if (!fileContent) {
-        console.log('🔄 Falling back to UTF-8...');
-        fileContent = rawBytes.toString('utf8');
-      }
-      
-      console.log('✅ Final encoding successful, length:', fileContent.length);
-      
-    } catch (encodingError) {
-      console.error('❌ All encoding attempts failed:', encodingError);
-      return res.status(400).json({ 
-        error: 'File encoding not supported',
-        details: encodingError.message
-      });
-    }
-
-    if (!fileContent || fileContent.length === 0) {
-      return res.status(400).json({ error: 'Could not decode file content' });
-    }
-
-    console.log('✅ Final content length:', fileContent.length);
-    console.log('📄 Content preview:', JSON.stringify(fileContent.substring(0, 100)));
-
-    // Parse data
-    console.log('🔄 Parsing...');
-    const parsedData = parseEDIData(fileContent);
-    console.log('✅ Parse complete');
+    console.log(`✅ Successfully decoded using: ${usedEncoding} - ${decodingResult.description}`);
 
     // Extract and process orders
-    console.log('🔄 Processing orders...');
-    const extractedOrders = extractOrderInfo(parsedData.segments || []);
-    console.log(`📊 Found ${extractedOrders.length} orders with LK IDs`);
+    const extractedOrders = parseOrdersFromContent(fileContent, ediFile.name, usedEncoding);
+    const orderResults = await processOrders(extractedOrders, req.session.user.username, ediFile.name, usedEncoding);
+    
+    await logUserActivity(req.session.user.username, req.session.user.type, `file_upload_${usedEncoding}`, clientIP);
 
-    // Process order updates
-    const orderResults = await processOrderUpdates(extractedOrders, req.session.user.username);
-    console.log('📊 Order processing results:', orderResults.summary);
-
-    // Add order info to parsed data
-    parsedData.orderManagement = {
-      totalOrders: extractedOrders.length,
-      results: orderResults
-    };
-
-    // Save to database
-    const result = await pool.query(
-      `INSERT INTO edi_files (filename, original_filename, file_content, parsed_data, uploaded_by, file_size) 
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-      [
-        ediFile.name.replace(/[^a-zA-Z0-9.-]/g, '_'),
-        ediFile.name,
-        fileContent,
-        JSON.stringify(parsedData),
-        req.session.user.username,
-        ediFile.size
-      ]
-    );
-
-    await logUserActivity(req.session.user.username, req.session.user.type, 'file_upload', clientIP);
-
-    console.log('✅ Upload complete, file ID:', result.rows[0].id);
+    console.log('✅ Upload processing complete');
 
     res.json({
       success: true,
-      fileId: result.rows[0].id,
-      message: `File uploaded successfully. Orders: ${orderResults.summary.new} new, ${orderResults.summary.updated} updated, ${orderResults.summary.unchanged} unchanged`,
-      parsedData: parsedData,
-      orderSummary: orderResults.summary,
+      message: `Upload successful! Decoded with ${decodingResult.description}. ${orderResults.newOrders.length} new, ${orderResults.updatedOrders.length} updated orders`,
+      encoding: usedEncoding,
+      encodingDescription: decodingResult.description,
       stats: {
-        originalSize: ediFile.size,
-        segmentCount: parsedData.totalSegments || 0,
-        orderCount: extractedOrders.length,
-        newOrders: orderResults.summary.new,
-        updatedOrders: orderResults.summary.updated,
-        hasParsingErrors: !!parsedData.error
+        totalOrders: extractedOrders.length,
+        newOrders: orderResults.newOrders.length,
+        updatedOrders: orderResults.updatedOrders.length,
+        unchangedOrders: orderResults.unchangedOrders.length
       }
     });
 
@@ -616,63 +563,33 @@ app.post('/upload', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/file/:id', requireAuth, async (req, res) => {
+// API endpoint for order details
+app.get('/api/order/:id', requireAuth, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM edi_files WHERE id = $1', [req.params.id]);
+    const result = await pool.query('SELECT * FROM edi_orders WHERE order_id = $1', [req.params.id]);
     if (result.rows.length === 0) {
-      return res.status(404).render('error', { 
-        message: 'File not found',
-        user: req.session.user 
-      });
+      return res.status(404).json({ error: 'Order not found' });
     }
-    res.render('file-view', {
-      user: req.session.user,
-      file: result.rows[0],
-      parsedData: result.rows[0].parsed_data
-    });
+    res.json(result.rows[0]);
   } catch (error) {
-    console.error('File view error:', error);
-    res.render('error', { 
-      message: 'Error loading file',
-      user: req.session.user 
-    });
+    console.error('Order fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch order' });
   }
 });
 
-// New route for order management
-app.get('/orders', requireAuth, async (req, res) => {
+// Database inspection endpoint (admin only)
+app.get('/api/db-inspect', requireAdmin, async (req, res) => {
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = 50;
-    const offset = (page - 1) * limit;
-    
-    const orders = await pool.query(`
-      SELECT order_id, order_data, created_by, updated_by, created_at, updated_at
-      FROM edi_orders 
-      ORDER BY updated_at DESC 
-      LIMIT $1 OFFSET $2
-    `, [limit, offset]);
-    
-    const totalCount = await pool.query('SELECT COUNT(*) FROM edi_orders');
-    const total = parseInt(totalCount.rows[0].count);
-    const totalPages = Math.ceil(total / limit);
-    
-    res.render('orders', {
-      user: req.session.user,
-      orders: orders.rows,
-      currentPage: page,
-      totalPages: totalPages,
-      total: total
-    });
+    const { inspectDatabase } = require('./database-inspector');
+    const report = await inspectDatabase();
+    res.json({ success: true, report });
   } catch (error) {
-    console.error('Orders view error:', error);
-    res.render('error', { 
-      message: 'Error loading orders',
-      user: req.session.user 
-    });
+    console.error('Database inspection error:', error);
+    res.status(500).json({ error: 'Database inspection failed' });
   }
 });
 
+// Admin logs route
 app.get('/logs', requireAdmin, async (req, res) => {
   try {
     const logs = await pool.query(
@@ -695,7 +612,7 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    features: ['japanese_encoding', 'order_management', 'temp_file_support']
+    features: ['order_management', 'shift_jis_priority', 'japanese_encoding']
   });
 });
 
@@ -715,10 +632,11 @@ app.use((req, res) => {
 });
 
 app.listen(PORT, async () => {
-  console.log(`🚀 EDI Parser Server with Order Management running on port ${PORT}`);
+  console.log(`🚀 Order Management System running on port ${PORT}`);
   console.log(`🌐 Access: http://localhost:${PORT}`);
   console.log(`🗄️  Database: Neon PostgreSQL`);
-  console.log(`🇯🇵 Features: Japanese encoding, Order management, Temp file support`);
+  console.log(`🇯🇵 Priority encoding: Shift-JIS (Japanese Windows)`);
+  console.log(`📦 Focus: Order Management Dashboard`);
   await initializeDB();
 });
 

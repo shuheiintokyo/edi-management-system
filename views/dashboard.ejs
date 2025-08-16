@@ -3,70 +3,70 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashboard - EDI Data Parser</title>
+    <title>Order Dashboard - EDI Management</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
-        .navbar-brand {
-            font-weight: bold;
-            color: #007bff !important;
-        }
-        .sidebar {
-            min-height: calc(100vh - 56px);
-            background-color: #f8f9fa;
-        }
-        .main-content {
-            min-height: calc(100vh - 56px);
-        }
-        .file-upload-area {
-            border: 2px dashed #007bff;
-            border-radius: 10px;
-            padding: 40px;
-            text-align: center;
-            background-color: #f8f9fa;
-            cursor: pointer;
-            transition: all 0.3s ease;
-        }
-        .file-upload-area:hover {
-            background-color: #e9ecef;
-            border-color: #0056b3;
-        }
-        .stats-card {
-            border-radius: 10px;
-            transition: transform 0.2s;
-        }
-        .stats-card:hover {
-            transform: translateY(-2px);
-        }
-        .progress-container {
-            display: none;
-            margin-top: 20px;
-        }
-        .table th {
-            background-color: #f8f9fa;
-            border-top: none;
-        }
-        .badge-file-size {
-            font-size: 0.75em;
-        }
-        .user-avatar {
-            width: 30px;
-            height: 30px;
-            border-radius: 50%;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            font-weight: bold;
-            font-size: 12px;
-        }
         .order-stats {
             background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
             color: white;
             border-radius: 10px;
             padding: 20px;
-            margin-bottom: 20px;
+            margin-bottom: 30px;
+        }
+        .upload-area {
+            border: 2px dashed #007bff;
+            border-radius: 10px;
+            padding: 30px;
+            text-align: center;
+            background-color: #f8f9fa;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-bottom: 30px;
+        }
+        .upload-area:hover {
+            background-color: #e9ecef;
+            border-color: #0056b3;
+        }
+        .order-table {
+            font-size: 14px;
+        }
+        .order-id {
+            background-color: #28a745;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-weight: bold;
+            font-family: monospace;
+        }
+        .user-badge {
+            font-size: 0.8em;
+        }
+        .table th {
+            background-color: #f8f9fa;
+            border-top: none;
+            font-weight: 600;
+        }
+        .navbar-brand {
+            font-weight: bold;
+        }
+        .order-details {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-width: 300px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .order-details:hover {
+            overflow: visible;
+            white-space: normal;
+            word-wrap: break-word;
+            background-color: #fff3cd;
+            padding: 5px;
+            border-radius: 3px;
+            position: relative;
+            z-index: 10;
         }
     </style>
 </head>
@@ -75,7 +75,7 @@
     <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
         <div class="container-fluid">
             <a class="navbar-brand" href="/dashboard">
-                <i class="fas fa-file-code me-2"></i>EDI Parser
+                <i class="fas fa-shopping-cart me-2"></i>Order Management
             </a>
             
             <div class="navbar-nav ms-auto">
@@ -89,12 +89,9 @@
                         <li><a class="dropdown-item" href="/dashboard">
                             <i class="fas fa-tachometer-alt me-2"></i>Dashboard
                         </a></li>
-                        <li><a class="dropdown-item" href="/orders">
-                            <i class="fas fa-shopping-cart me-2"></i>Order Management
-                        </a></li>
                         <% if (user.type === 'admin') { %>
                         <li><a class="dropdown-item" href="/logs">
-                            <i class="fas fa-list me-2"></i>User Logs
+                            <i class="fas fa-list me-2"></i>Activity Logs
                         </a></li>
                         <li><hr class="dropdown-divider"></li>
                         <% } %>
@@ -107,271 +104,224 @@
         </div>
     </nav>
 
-    <!-- Main Content -->
-    <div class="container-fluid">
+    <div class="container-fluid mt-4">
+        <!-- Page Header -->
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h2>
+                <i class="fas fa-shopping-cart me-2 text-primary"></i>
+                Order Dashboard
+            </h2>
+            <div>
+                <span class="text-muted">Welcome back, <strong><%= user.username %></strong></span>
+                <button class="btn btn-outline-primary btn-sm ms-2" onclick="location.reload()">
+                    <i class="fas fa-sync-alt me-1"></i>Refresh
+                </button>
+            </div>
+        </div>
+
+        <!-- Order Statistics -->
+        <div class="order-stats">
+            <h5 class="mb-3">
+                <i class="fas fa-chart-line me-2"></i>Order Overview
+            </h5>
+            <div class="row">
+                <div class="col-md-3">
+                    <h3 class="mb-1"><%= orderStats.total_orders %></h3>
+                    <small>Total Orders</small>
+                </div>
+                <div class="col-md-3">
+                    <h3 class="mb-1"><%= orderStats.orders_today %></h3>
+                    <small>New Today</small>
+                </div>
+                <div class="col-md-3">
+                    <h3 class="mb-1"><%= orderStats.updated_today %></h3>
+                    <small>Updated Today</small>
+                </div>
+                <div class="col-md-3">
+                    <h3 class="mb-1"><%= orders.length %></h3>
+                    <small>Showing Recent</small>
+                </div>
+            </div>
+        </div>
+
+        <!-- Quick Upload -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="upload-area" id="uploadArea">
+                    <i class="fas fa-cloud-upload-alt fa-2x text-primary mb-2"></i>
+                    <h6>Upload EDI File to Add/Update Orders</h6>
+                    <p class="text-muted mb-2">Drop .EDIdat file here or click to browse</p>
+                    <button type="button" class="btn btn-primary btn-sm">
+                        <i class="fas fa-file-upload me-1"></i>Choose File
+                    </button>
+                    <br><small class="text-muted">Supports Japanese encoding | Max 50MB</small>
+                </div>
+                <input type="file" id="fileInput" accept=".edidat,.edi,.txt" style="display: none;">
+                
+                <!-- Upload Progress -->
+                <div id="uploadProgress" style="display: none;" class="mt-3">
+                    <div class="progress mb-2">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                             role="progressbar" style="width: 0%"></div>
+                    </div>
+                    <small class="text-muted">Processing orders...</small>
+                </div>
+            </div>
+        </div>
+
+        <!-- Orders Table -->
         <div class="row">
-            <!-- Sidebar -->
-            <nav class="col-md-3 col-lg-2 d-md-block sidebar collapse">
-                <div class="position-sticky pt-3">
-                    <ul class="nav flex-column">
-                        <li class="nav-item">
-                            <a class="nav-link active" href="/dashboard">
-                                <i class="fas fa-tachometer-alt me-2"></i>Dashboard
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="#upload" onclick="scrollToUpload()">
-                                <i class="fas fa-upload me-2"></i>Upload EDI File
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="/orders">
-                                <i class="fas fa-shopping-cart me-2"></i>Order Management
-                            </a>
-                        </li>
-                        <% if (user.type === 'admin') { %>
-                        <li class="nav-item">
-                            <a class="nav-link" href="/logs">
-                                <i class="fas fa-list me-2"></i>User Activity Logs
-                            </a>
-                        </li>
-                        <% } %>
-                    </ul>
-                </div>
-            </nav>
-
-            <!-- Page Content -->
-            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 main-content">
-                <div class="pt-3">
-                    <!-- Header -->
-                    <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pb-2 mb-3 border-bottom">
-                        <h1 class="h2">
-                            <i class="fas fa-tachometer-alt me-2 text-primary"></i>
-                            Dashboard
-                        </h1>
-                        <div class="btn-toolbar mb-2 mb-md-0">
-                            <div class="btn-group me-2">
-                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="location.reload()">
-                                    <i class="fas fa-sync-alt me-1"></i>Refresh
-                                </button>
-                            </div>
+            <div class="col-12">
+                <div class="card border-0 shadow-sm">
+                    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">
+                            <i class="fas fa-list me-2"></i>
+                            Recent Orders
+                            <span class="badge bg-primary"><%= total %> total</span>
+                        </h5>
+                        <div>
+                            <!-- Pagination Info -->
+                            <% if (totalPages > 1) { %>
+                            <small class="text-muted me-3">Page <%= currentPage %> of <%= totalPages %></small>
+                            <% } %>
+                            <button class="btn btn-sm btn-outline-secondary" onclick="exportOrders()">
+                                <i class="fas fa-download me-1"></i>Export
+                            </button>
                         </div>
                     </div>
-
-                    <!-- Welcome Message -->
-                    <div class="row mb-4">
-                        <div class="col-12">
-                            <div class="alert alert-info border-0" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
-                                <h5 class="alert-heading mb-1">
-                                    <i class="fas fa-hand-wave me-2"></i>
-                                    Welcome back, <%= user.username %>!
-                                </h5>
-                                <p class="mb-0">
-                                    <% if (user.type === 'admin') { %>
-                                    You have full administrative access to upload, manage EDI files, and view user activity logs.
-                                    <% } else { %>
-                                    You can upload and view EDI files with automatic order processing. Use the upload section below to get started.
-                                    <% } %>
-                                </p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Order Statistics -->
-                    <% if (orderStats && orderStats.total_orders > 0) { %>
-                    <div class="row mb-4">
-                        <div class="col-12">
-                            <div class="order-stats">
-                                <h5 class="mb-3">
-                                    <i class="fas fa-shopping-cart me-2"></i>Order Management Overview
-                                </h5>
-                                <div class="row">
-                                    <div class="col-md-4">
-                                        <h3 class="mb-1"><%= orderStats.total_orders %></h3>
-                                        <small>Total Orders in System</small>
-                                    </div>
-                                    <div class="col-md-4">
-                                        <h3 class="mb-1"><%= orderStats.orders_today %></h3>
-                                        <small>New Orders Today</small>
-                                    </div>
-                                    <div class="col-md-4">
-                                        <h3 class="mb-1"><%= orderStats.updated_today %></h3>
-                                        <small>Updated Orders Today</small>
-                                    </div>
-                                </div>
-                                <div class="mt-3">
-                                    <a href="/orders" class="btn btn-light btn-sm">
-                                        <i class="fas fa-eye me-1"></i>View All Orders
-                                    </a>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <% } %>
-
-                    <!-- Stats Cards -->
-                    <div class="row mb-4">
-                        <div class="col-md-4">
-                            <div class="card stats-card border-0 shadow-sm">
-                                <div class="card-body text-center">
-                                    <div class="display-6 text-primary mb-2">
-                                        <i class="fas fa-file-upload"></i>
-                                    </div>
-                                    <h6 class="card-title text-muted">Recent Files</h6>
-                                    <h3 class="text-primary" id="totalFiles"><%= recentFiles.length %></h3>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-4">
-                            <div class="card stats-card border-0 shadow-sm">
-                                <div class="card-body text-center">
-                                    <div class="display-6 text-success mb-2">
-                                        <i class="fas fa-check-circle"></i>
-                                    </div>
-                                    <h6 class="card-title text-muted">Access Level</h6>
-                                    <h3 class="text-success">
-                                        <% if (user.type === 'admin') { %>
-                                        Admin
-                                        <% } else { %>
-                                        User
-                                        <% } %>
-                                    </h3>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-4">
-                            <div class="card stats-card border-0 shadow-sm">
-                                <div class="card-body text-center">
-                                    <div class="display-6 text-warning mb-2">
-                                        <i class="fas fa-language"></i>
-                                    </div>
-                                    <h6 class="card-title text-muted">Format Support</h6>
-                                    <h6 class="text-warning">Japanese EDI</h6>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- File Upload Section -->
-                    <div class="row mb-4" id="upload">
-                        <div class="col-12">
-                            <div class="card border-0 shadow-sm">
-                                <div class="card-header bg-white">
-                                    <h5 class="mb-0">
-                                        <i class="fas fa-upload me-2 text-primary"></i>
-                                        Upload Japanese EDI File
-                                    </h5>
-                                </div>
-                                <div class="card-body">
-                                    <div class="file-upload-area" id="uploadArea">
-                                        <div class="mb-3">
-                                            <i class="fas fa-cloud-upload-alt fa-3x text-primary mb-3"></i>
-                                            <h5>Drop your .EDIdat file here</h5>
-                                            <p class="text-muted mb-3">Automatic Japanese encoding detection and order processing</p>
-                                            <button type="button" class="btn btn-primary">
-                                                <i class="fas fa-folder-open me-2"></i>Choose File
+                    <div class="card-body p-0">
+                        <% if (orders && orders.length > 0) { %>
+                        <div class="table-responsive">
+                            <table class="table table-hover order-table mb-0">
+                                <thead>
+                                    <tr>
+                                        <th style="width: 150px;">Order ID</th>
+                                        <th>Order Details</th>
+                                        <th style="width: 120px;">Created By</th>
+                                        <th style="width: 120px;">Updated By</th>
+                                        <th style="width: 150px;">Created Date</th>
+                                        <th style="width: 150px;">Updated Date</th>
+                                        <th style="width: 80px;">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <% orders.forEach(order => { %>
+                                    <tr>
+                                        <td>
+                                            <span class="order-id"><%= order.order_id %></span>
+                                        </td>
+                                        <td>
+                                            <div class="order-details" title="<%= JSON.stringify(order.order_data, null, 2) %>">
+                                                <% 
+                                                // Extract key fields from order_data for preview
+                                                const data = order.order_data;
+                                                const previewFields = [];
+                                                for (let key in data) {
+                                                    if (data[key] && data[key].length > 0 && data[key] !== order.order_id) {
+                                                        previewFields.push(data[key]);
+                                                        if (previewFields.length >= 3) break;
+                                                    }
+                                                }
+                                                %>
+                                                <%= previewFields.join(' | ') || 'No details' %>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <span class="badge bg-light text-dark user-badge">
+                                                <%= order.created_by %>
+                                            </span>
+                                        </td>
+                                        <td>
+                                            <% if (order.updated_by) { %>
+                                            <span class="badge bg-warning user-badge">
+                                                <%= order.updated_by %>
+                                            </span>
+                                            <% } else { %>
+                                            <span class="text-muted">-</span>
+                                            <% } %>
+                                        </td>
+                                        <td>
+                                            <small class="text-muted">
+                                                <%= new Date(order.created_at).toLocaleDateString() %><br>
+                                                <%= new Date(order.created_at).toLocaleTimeString() %>
+                                            </small>
+                                        </td>
+                                        <td>
+                                            <small class="text-muted">
+                                                <%= new Date(order.updated_at).toLocaleDateString() %><br>
+                                                <%= new Date(order.updated_at).toLocaleTimeString() %>
+                                            </small>
+                                        </td>
+                                        <td>
+                                            <button class="btn btn-sm btn-outline-primary" 
+                                                    onclick="viewOrderDetails('<%= order.order_id %>')">
+                                                <i class="fas fa-eye"></i>
                                             </button>
-                                        </div>
-                                        <small class="text-muted">
-                                            Supported format: .EDIdat files | Maximum size: 50MB | Auto-detects: Shift_JIS, CP932, EUC-JP
-                                        </small>
-                                    </div>
-                                    
-                                    <div class="progress-container">
-                                        <div class="progress mb-2">
-                                            <div class="progress-bar progress-bar-striped progress-bar-animated" 
-                                                 role="progressbar" style="width: 0%"></div>
-                                        </div>
-                                        <small class="text-muted">Uploading and processing orders...</small>
-                                    </div>
-
-                                    <input type="file" id="fileInput" accept=".edidat,.edi,.txt" style="display: none;">
-                                </div>
-                            </div>
+                                        </td>
+                                    </tr>
+                                    <% }); %>
+                                </tbody>
+                            </table>
                         </div>
-                    </div>
 
-                    <!-- Recent Files -->
-                    <div class="row">
-                        <div class="col-12">
-                            <div class="card border-0 shadow-sm">
-                                <div class="card-header bg-white d-flex justify-content-between align-items-center">
-                                    <h5 class="mb-0">
-                                        <i class="fas fa-file-alt me-2 text-primary"></i>
-                                        Recent Files
-                                    </h5>
-                                    <small class="text-muted">Last 10 uploads</small>
-                                </div>
-                                <div class="card-body p-0">
-                                    <% if (recentFiles.length > 0) { %>
-                                    <div class="table-responsive">
-                                        <table class="table table-hover mb-0">
-                                            <thead>
-                                                <tr>
-                                                    <th>File Name</th>
-                                                    <th>Uploaded By</th>
-                                                    <th>Upload Date</th>
-                                                    <th>Size</th>
-                                                    <th>Actions</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                <% recentFiles.forEach(file => { %>
-                                                <tr>
-                                                    <td>
-                                                        <i class="fas fa-file-code text-primary me-2"></i>
-                                                        <%= file.original_filename %>
-                                                    </td>
-                                                    <td>
-                                                        <div class="d-flex align-items-center">
-                                                            <div class="user-avatar me-2">
-                                                                <%= file.uploaded_by.charAt(0).toUpperCase() %>
-                                                            </div>
-                                                            <%= file.uploaded_by %>
-                                                        </div>
-                                                    </td>
-                                                    <td>
-                                                        <small class="text-muted">
-                                                            <%= new Date(file.upload_timestamp).toLocaleDateString() %>
-                                                            <%= new Date(file.upload_timestamp).toLocaleTimeString() %>
-                                                        </small>
-                                                    </td>
-                                                    <td>
-                                                        <span class="badge bg-secondary badge-file-size">
-                                                            <%= file.file_size ? (file.file_size / 1024).toFixed(1) + ' KB' : 'Unknown' %>
-                                                        </span>
-                                                    </td>
-                                                    <td>
-                                                        <a href="/file/<%= file.id %>" class="btn btn-sm btn-outline-primary">
-                                                            <i class="fas fa-eye me-1"></i>View
-                                                        </a>
-                                                        <% if (user.type === 'admin') { %>
-                                                        <button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteFile(<%= file.id %>)">
-                                                            <i class="fas fa-trash me-1"></i>Delete
-                                                        </button>
-                                                        <% } %>
-                                                    </td>
-                                                </tr>
-                                                <% }); %>
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                    <% } else { %>
-                                    <div class="text-center py-5">
-                                        <i class="fas fa-file-upload fa-3x text-muted mb-3"></i>
-                                        <h6 class="text-muted">No files uploaded yet</h6>
-                                        <p class="text-muted mb-3">Upload your first Japanese .EDIdat file to get started with order management</p>
-                                        <button class="btn btn-primary" onclick="scrollToUpload()">
-                                            <i class="fas fa-upload me-2"></i>Upload File
-                                        </button>
-                                    </div>
+                        <!-- Pagination -->
+                        <% if (totalPages > 1) { %>
+                        <div class="card-footer bg-white">
+                            <nav aria-label="Order pagination">
+                                <ul class="pagination pagination-sm justify-content-center mb-0">
+                                    <% if (currentPage > 1) { %>
+                                    <li class="page-item">
+                                        <a class="page-link" href="/dashboard?page=<%= currentPage - 1 %>">Previous</a>
+                                    </li>
                                     <% } %>
-                                </div>
-                            </div>
+                                    
+                                    <% for (let i = Math.max(1, currentPage - 2); i <= Math.min(totalPages, currentPage + 2); i++) { %>
+                                    <li class="page-item <%= i === currentPage ? 'active' : '' %>">
+                                        <a class="page-link" href="/dashboard?page=<%= i %>"><%= i %></a>
+                                    </li>
+                                    <% } %>
+                                    
+                                    <% if (currentPage < totalPages) { %>
+                                    <li class="page-item">
+                                        <a class="page-link" href="/dashboard?page=<%= currentPage + 1 %>">Next</a>
+                                    </li>
+                                    <% } %>
+                                </ul>
+                            </nav>
                         </div>
+                        <% } %>
+
+                        <% } else { %>
+                        <div class="text-center py-5">
+                            <i class="fas fa-shopping-cart fa-3x text-muted mb-3"></i>
+                            <h6 class="text-muted">No Orders Found</h6>
+                            <p class="text-muted mb-3">Upload an EDI file to start managing orders</p>
+                            <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
+                                <i class="fas fa-upload me-2"></i>Upload First File
+                            </button>
+                        </div>
+                        <% } %>
                     </div>
                 </div>
-            </main>
+            </div>
+        </div>
+    </div>
+
+    <!-- Order Details Modal -->
+    <div class="modal fade" id="orderModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Order Details</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div id="orderDetails">Loading...</div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -380,37 +330,12 @@
         // File upload functionality
         const uploadArea = document.getElementById('uploadArea');
         const fileInput = document.getElementById('fileInput');
-        const progressContainer = document.querySelector('.progress-container');
+        const uploadProgress = document.getElementById('uploadProgress');
         const progressBar = document.querySelector('.progress-bar');
-
-        function scrollToUpload() {
-            document.getElementById('upload').scrollIntoView({ behavior: 'smooth' });
-        }
 
         // Click to upload
         uploadArea.addEventListener('click', () => {
             fileInput.click();
-        });
-
-        // Drag and drop functionality
-        uploadArea.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            uploadArea.classList.add('dragover');
-        });
-
-        uploadArea.addEventListener('dragleave', (e) => {
-            e.preventDefault();
-            uploadArea.classList.remove('dragover');
-        });
-
-        uploadArea.addEventListener('drop', (e) => {
-            e.preventDefault();
-            uploadArea.classList.remove('dragover');
-            
-            const files = e.dataTransfer.files;
-            if (files.length > 0) {
-                handleFileUpload(files[0]);
-            }
         });
 
         // File input change
@@ -422,19 +347,13 @@
 
         function handleFileUpload(file) {
             // Validate file type
-            if (!file.name.toLowerCase().endsWith('.edidat') && !file.name.toLowerCase().endsWith('.edi') && !file.name.toLowerCase().endsWith('.txt')) {
+            if (!file.name.toLowerCase().match(/\.(edidat|edi|txt)$/)) {
                 alert('Please upload a .EDIdat, .edi, or .txt file only');
                 return;
             }
 
-            // Validate file size (50MB limit)
-            if (file.size > 50 * 1024 * 1024) {
-                alert('File size must be less than 50MB');
-                return;
-            }
-
             // Show progress
-            progressContainer.style.display = 'block';
+            uploadProgress.style.display = 'block';
             progressBar.style.width = '0%';
 
             // Create FormData
@@ -452,21 +371,13 @@
             });
 
             xhr.addEventListener('load', () => {
-                progressContainer.style.display = 'none';
+                uploadProgress.style.display = 'none';
                 
                 if (xhr.status === 200) {
                     const response = JSON.parse(xhr.responseText);
                     if (response.success) {
-                        let message = 'File uploaded and processed successfully!';
-                        if (response.orderSummary) {
-                            message += `\n\nOrder Processing Results:`;
-                            message += `\n• ${response.orderSummary.new} new orders`;
-                            message += `\n• ${response.orderSummary.updated} updated orders`;
-                            message += `\n• ${response.orderSummary.unchanged} unchanged orders`;
-                        }
-                        alert(message);
-                        // Redirect to file view
-                        window.location.href = '/file/' + response.fileId;
+                        alert(`Upload successful!\n\n${response.stats.newOrders} new orders\n${response.stats.updatedOrders} updated orders\n${response.stats.unchangedOrders} unchanged orders`);
+                        location.reload(); // Refresh to show new orders
                     } else {
                         alert('Upload failed: ' + response.message);
                     }
@@ -477,7 +388,7 @@
             });
 
             xhr.addEventListener('error', () => {
-                progressContainer.style.display = 'none';
+                uploadProgress.style.display = 'none';
                 alert('Upload failed due to network error');
             });
 
@@ -485,40 +396,84 @@
             xhr.send(formData);
         }
 
-        <% if (user.type === 'admin') { %>
-        function deleteFile(fileId) {
-            if (confirm('Are you sure you want to delete this file?')) {
-                fetch('/file/' + fileId, {
-                    method: 'DELETE',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    }
-                })
+        // View order details
+        function viewOrderDetails(orderId) {
+            fetch(`/api/order/${orderId}`)
                 .then(response => response.json())
                 .then(data => {
-                    if (data.success) {
-                        location.reload();
-                    } else {
-                        alert('Failed to delete file: ' + data.message);
-                    }
+                    const detailsDiv = document.getElementById('orderDetails');
+                    detailsDiv.innerHTML = `
+                        <div class="row">
+                            <div class="col-md-6">
+                                <h6>Order Information</h6>
+                                <table class="table table-sm">
+                                    <tr><td><strong>Order ID:</strong></td><td>${data.order_id}</td></tr>
+                                    <tr><td><strong>Created By:</strong></td><td>${data.created_by}</td></tr>
+                                    <tr><td><strong>Created:</strong></td><td>${new Date(data.created_at).toLocaleString()}</td></tr>
+                                    <tr><td><strong>Updated:</strong></td><td>${new Date(data.updated_at).toLocaleString()}</td></tr>
+                                    ${data.updated_by ? `<tr><td><strong>Updated By:</strong></td><td>${data.updated_by}</td></tr>` : ''}
+                                </table>
+                            </div>
+                            <div class="col-md-6">
+                                <h6>Order Data</h6>
+                                <pre class="bg-light p-2 rounded" style="font-size: 12px; max-height: 200px; overflow-y: auto;">${JSON.stringify(data.order_data, null, 2)}</pre>
+                            </div>
+                        </div>
+                        ${data.raw_segment ? `
+                        <div class="mt-3">
+                            <h6>Raw Segment</h6>
+                            <pre class="bg-dark text-light p-2 rounded" style="font-size: 11px;">${data.raw_segment}</pre>
+                        </div>
+                        ` : ''}
+                    `;
+                    
+                    const modal = new bootstrap.Modal(document.getElementById('orderModal'));
+                    modal.show();
                 })
                 .catch(error => {
-                    alert('Error deleting file: ' + error.message);
+                    alert('Failed to load order details: ' + error.message);
                 });
-            }
         }
-        <% } %>
 
-        // Auto-refresh stats every 30 seconds
+        // Export orders
+        function exportOrders() {
+            const table = document.querySelector('.order-table');
+            if (!table) return;
+            
+            let csv = 'Order ID,Order Details,Created By,Updated By,Created Date,Updated Date\n';
+            
+            const rows = table.querySelectorAll('tbody tr');
+            rows.forEach(row => {
+                const cells = row.querySelectorAll('td');
+                const rowData = [
+                    cells[0].textContent.trim(),
+                    cells[1].textContent.trim().replace(/"/g, '""'),
+                    cells[2].textContent.trim(),
+                    cells[3].textContent.trim(),
+                    cells[4].textContent.trim().replace(/\n/g, ' '),
+                    cells[5].textContent.trim().replace(/\n/g, ' ')
+                ];
+                csv += rowData.map(field => `"${field}"`).join(',') + '\n';
+            });
+            
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `orders_${new Date().toISOString().split('T')[0]}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+        }
+
+        // Auto-refresh every 5 minutes
         setInterval(() => {
-            // Update total files count
-            fetch('/api/stats')
-                .then(response => response.json())
-                .then(data => {
-                    document.getElementById('totalFiles').textContent = data.totalFiles;
-                })
-                .catch(error => console.log('Stats update failed:', error));
-        }, 30000);
+            const currentTime = new Date();
+            if (currentTime.getMinutes() % 5 === 0 && currentTime.getSeconds() === 0) {
+                location.reload();
+            }
+        }, 1000);
     </script>
 </body>
 </html>
